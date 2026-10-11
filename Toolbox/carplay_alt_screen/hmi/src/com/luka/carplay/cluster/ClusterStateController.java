@@ -162,6 +162,7 @@ public final class ClusterStateController {
         diag("carplay_session=" + (active ? "1" : "0"));
         WheelZoomBridge.logCarPlayLifecycle(active);
         if (!active) WheelZoomBridge.reset();
+        geometryReapply("carplay-session-change");
     }
 
     public static void setRgiPresentationActive(boolean active) {

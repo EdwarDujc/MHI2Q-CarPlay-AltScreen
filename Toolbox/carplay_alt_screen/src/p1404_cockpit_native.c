@@ -35,6 +35,8 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 /* Host fixtures and the legacy preload build may omit the K1004 direct
  * resolver. Keep it optional there; the exact direct overlay provides it. */
@@ -446,11 +448,42 @@ int p1404_cockpit_native_bind_stock(void) {
            bind_screen_native_api();
 }
 
+static uint32_t wheel_now_us32(void);
 static int run_dmdt(const char *verb, const char *a, const char *b) {
     long rc;
+    int status = 0;
+    uint32_t start;
+    unsigned polls = 0;
+    static int pending_child = -1; // QNX ARM pid_t; all callers hold route_lock.
     if (!g_spawnl || !verb || !a || !b) return -1;
-    rc = g_spawnl(P1404_P_WAIT, DMDT_PATH, "dmdt", verb, a, b, (char *)0);
-    return (int)rc;
+    if (pending_child > 0) {
+        int r = waitpid(pending_child, &status, WNOHANG);
+        if (r != pending_child && !(r < 0 && errno == ECHILD)) return -1;
+        pending_child = -1;
+    }
+    rc = g_spawnl(1 /* QNX P_NOWAIT */, DMDT_PATH, "dmdt", verb, a, b, (char *)0);
+    if (rc <= 0) return -1;
+    start = wheel_now_us32();
+    for (;;) {
+        int r = waitpid((int)rc, &status, WNOHANG);
+        if (r == (int)rc) return status == 0 ? 0 : -1;
+        if (r < 0 && errno == ECHILD) return -1;
+        if (r < 0 && errno != EINTR) break;
+        if (++polls >= 300u ||
+            (uint32_t)(wheel_now_us32() - start) >= 1500000u) break;
+        usleep(5000);
+    }
+    (void)kill((int)rc, 9); // SIGKILL in both QNX and the host fixtures.
+    start = wheel_now_us32();
+    polls = 0;
+    do {
+        int r = waitpid((int)rc, &status, WNOHANG);
+        if (r == (int)rc || (r < 0 && errno == ECHILD)) return -1;
+        usleep(5000);
+    } while (++polls < 20u &&
+             (uint32_t)(wheel_now_us32() - start) < 100000u);
+    pending_child = (int)rc;
+    return -1;
 }
 
 static int run_activate_route(void) {
@@ -564,7 +597,8 @@ static void *native_route_worker(void *arg) {
     return NULL;
 }
 
-static int request_route_action(struct native_slot *slot, int action) {
+static int request_route_action(struct native_slot *slot, int action,
+        void *receiver, void *stream, uint32_t generation) {
     struct native_thread_job *job;
     native_pthread_t thread = 0;
     int rc;
@@ -572,7 +606,9 @@ static int request_route_action(struct native_slot *slot, int action) {
     job = (struct native_thread_job *)calloc(1u, sizeof(*job));
     if (!job) return 0;
     native_lock();
-    if (!slot->stream || slot->action_pending) {
+    if (!slot->stream || slot->action_pending ||
+        slot->receiver != receiver || slot->stream != stream ||
+        slot->generation != generation) {
         native_unlock();
         free(job);
         return 0;
@@ -1063,9 +1099,8 @@ static void native_check_view_area_fresh_frame(
     }
 }
 
-/* Only held around recovery submission and ProcessFrames enter/exit, never
- * while receiving video or while joining the worker. Avoid the control fence:
- * teardown holds that fence while joining this worker. */
+/* ProcessFrames enter/exit metadata only. Never hold this lock across OEM
+ * submission or joins: teardown may already be joining this worker. */
 static void recovery_lock(void) {
     while (__sync_lock_test_and_set(&g_recovery_guard, 1u)) usleep(1000);
 }
@@ -1079,6 +1114,39 @@ void p1404_cockpit_native_processing(void *receiver, void *stream, int live) {
     if (slot) slot->processing_live = live;
     native_unlock();
     recovery_unlock();
+}
+
+int p1404_cockpit_native_command_current(void *receiver, void *stream,
+                                       uint32_t generation) {
+    struct native_slot *slot;
+    int live;
+    native_lock();
+    slot = find_stream_locked(receiver, stream);
+    live = slot && slot->generation == generation && slot->processing_live;
+    native_unlock();
+    return live;
+}
+
+int p1404_cockpit_native_command_acquire(void *receiver, void *stream,
+                                       uint32_t generation) {
+    struct native_slot *slot;
+    int retained = 0;
+    native_lock();
+    slot = find_stream_locked(receiver, stream);
+    if (slot && slot->generation == generation && slot->processing_live)
+        retained = alt_airplay_retain_object(receiver);
+    native_unlock();
+    return retained;
+}
+
+/* A SETUP transaction token is not a live-stream token. Duplicate or failed
+ * SETUP may advance the former while preserving this committed mapping. */
+static int native_committed_stream_current(void *receiver, void *stream,
+                                           uint32_t state_generation) {
+    struct altscreen_ctx snapshot;
+    return alt_state_snapshot(receiver, 1, &snapshot) &&
+        snapshot.generation == state_generation &&
+        snapshot.alt_screen_stream == stream;
 }
 
 /* Recovery never changes stream ownership, TCP/CTR state, or Main110. */
@@ -1115,7 +1183,7 @@ static void native_check_stream_recovery(void *receiver, void *stream,
             slot->preconfig_rewritten && slot->config_ok &&
             slot->first_real_frame_posted && slot->keyframe_event_state != 1 &&
             slot->view_area_event_state != 1 &&
-            alt_control_fence_is_current(state_generation);
+            native_committed_stream_current(receiver, stream, state_generation);
         action = alt111_recovery_poll(&slot->recovery, now,
             progress.generation, progress.frame_count, eligible);
         seq = slot->recovery.command_seq;
@@ -1130,19 +1198,16 @@ static void native_check_stream_recovery(void *receiver, void *stream,
         !!(action & ALT111_RECOVERY_PROGRESS),
         !!(action & ALT111_RECOVERY_EXHAUSTED));
     if (!(action & ALT111_RECOVERY_REQUEST)) return;
-    /* ProcessFrames exit waits for this guard before StopSession; no request
-     * can run on a stopped private session. Native identity and cancellation
-     * are checked again; a synchronous callback only takes native_lock. */
-    recovery_lock();
+    /* Never hold a recovery lock across an OEM call. The common submission
+     * path rechecks identity and retains the receiver under native_lock. */
     native_lock();
     slot = find_stream_locked(receiver, stream);
     live = slot && slot->generation == generation &&
         slot->state_generation == state_generation && slot->processing_live &&
         slot->recovery.inflight_seq == seq &&
-        alt_control_fence_is_current(state_generation);
+        native_committed_stream_current(receiver, stream, state_generation);
     native_unlock();
     send_rc = live ? alt_send_cluster_recovery(receiver, stream, generation, seq) : -1;
-    recovery_unlock();
     altscreen_log("PHASE=ALT111_RECOVERY_SUBMIT receiver=%p stream=%p generation=%u request_seq=%u attempt=%u event=forceKeyFrame rc=%d live=%d preserve_main110=1 tcp_reconnect=0",
         receiver, stream, generation, seq, attempts, send_rc, live);
     if (send_rc != 0)
@@ -1362,7 +1427,7 @@ static void *native_monitor_worker(void *arg) {
         if (!live) break;
 
         wheel_generation_current =
-            alt_control_fence_is_current(state_generation);
+            native_committed_stream_current(receiver, stream, state_generation);
         zoom_gate = route_ready && cluster_owned && wheel_generation_current;
 
         if (event_kind == ALT111_EVENT_UPDATE_VIEW_AREA) {
@@ -1797,10 +1862,10 @@ static void *native_monitor_worker(void *arg) {
         if (route_ready && !visible && !pending && native_route_requested()) {
             altscreen_log("PHASE=NATIVE_111_ROUTE_READY receiver=%p stream=%p generation=%u basis=dynamic_config_plus_accepted_showui_plus_first_real_type111_post video_availability_gate=real_frame",
                           receiver, stream, generation);
-            (void)request_route_action(slot, NATIVE_ROUTE_ACTIVATE);
+            (void)request_route_action(slot, NATIVE_ROUTE_ACTIVATE, receiver, stream, generation);
         } else if (visible && !pending && !native_route_requested()) {
             altscreen_log("WARN PHASE=NATIVE_111_ROUTE_WATCHDOG reason=route_marker_removed restore=1");
-            (void)request_route_action(slot, NATIVE_ROUTE_RESTORE);
+            (void)request_route_action(slot, NATIVE_ROUTE_RESTORE, receiver, stream, generation);
         }
     }
     free(job);
@@ -2208,13 +2273,38 @@ int p1404_cockpit_native_attach(void *receiver, void *stream) {
     return 1;
 }
 
+static void *native_detach_restore_worker(void *arg) {
+    uint32_t generation = *(uint32_t *)arg;
+    free(arg);
+    route_lock();
+    if (g_route_generation == generation && run_restore_route())
+        g_route_generation = 0;
+    route_unlock();
+    return NULL;
+}
+
+static int queue_detach_restore(uint32_t generation) {
+    native_pthread_t thread = 0;
+    uint32_t *job;
+    if (!generation || !g_pthread_create || !g_pthread_detach) return 0;
+    job = malloc(sizeof(*job));
+    if (!job) return 0;
+    *job = generation;
+    if (g_pthread_create(&thread, NULL, native_detach_restore_worker, job) != 0) {
+        free(job);
+        return 0;
+    }
+    (void)g_pthread_detach(thread);
+    return 1;
+}
+
 void p1404_cockpit_native_detach(void *receiver, void *stream) {
     struct native_slot *slot;
     uint32_t generation = 0;
     uint32_t state_generation = 0;
     int send_stop = 0;
     int restore = 0;
-    int restored = 0;
+    int restore_queued = 0;
     native_lock();
     slot = find_stream_locked(receiver, stream);
     if (slot) {
@@ -2235,23 +2325,16 @@ void p1404_cockpit_native_detach(void *receiver, void *stream) {
         (void)alt_send_cluster_event(receiver, stream, generation,
                                      ALT111_EVENT_STOP_UI);
     if (restore) {
-        route_lock();
-        /* A pending old activation either completed and restored itself before
-         * we acquired this lock, or will observe the invalidated generation
-         * after release and perform no display mutation. Only the generation
-         * that actually owns context76 may restore it here. */
-        if (g_route_generation == generation) {
-            restored = run_restore_route();
-            if (restored) g_route_generation = 0;
-        }
-        route_unlock();
+        // No helper, route lock or wait belongs on the stock audio-stop path.
+        // The detached job carries only an identity; it never dereferences a
+        // receiver or slot that a later session can reclaim.
+        restore_queued = queue_detach_restore(generation);
+        if (!restore_queued)
+            altscreen_log("ERROR PHASE=NATIVE_111_RESTORE_QUEUE generation=%u scheduled=0", generation);
     }
-    if (restored)
-        alt_state_mark_native(receiver, state_generation,
-                              ALT_STATE_NATIVE_COCKPIT_HIDDEN,
-                              "private111-detach-restored-context74");
-    altscreen_log("PHASE=NATIVE_111_DETACH receiver=%p stream=%p restore=%d restored=%d",
-                  receiver, stream, restore, restored);
+    (void)state_generation;
+    altscreen_log("PHASE=NATIVE_111_DETACH receiver=%p stream=%p restore=%d restore_queued=%d",
+                  receiver, stream, restore, restore_queued);
 }
 
 #ifdef ALTSCREEN_NATIVE_HOST_TEST
@@ -2288,10 +2371,12 @@ int p1404_cockpit_native_test_route_seed(void *receiver, void *stream,
 int p1404_cockpit_native_test_route_request(void *receiver, void *stream,
                                             int action) {
     struct native_slot *slot;
+    uint32_t generation = 0;
     native_lock();
     slot = find_stream_locked(receiver, stream);
+    if (slot) generation = slot->generation;
     native_unlock();
-    return request_route_action(slot, action);
+    return request_route_action(slot, action, receiver, stream, generation);
 }
 int p1404_cockpit_native_test_route_visible(void *receiver, void *stream) {
     struct native_slot *slot;

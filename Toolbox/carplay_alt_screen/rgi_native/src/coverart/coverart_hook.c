@@ -106,6 +106,7 @@ static uint32_t recv_generation = 1;
 /* Module state */
 static struct {
     uint32_t last_crc;
+    uint32_t last_generation;
     int images_found;
     int slot;           /* ping-pong: 0 or 1 */
 } g_coverart = {
@@ -335,7 +336,9 @@ static int ensure_dir(const char* dir) {
  *   3. rename() temp symlink over coverart.png  (atomic on POSIX)
  *   4. Unlink old coverart_<old_slot>.png
  */
-static int write_png_file(const uint8_t* data, size_t len) {
+static void write_coverart_notify(uint32_t crc);
+static int write_png_file(const uint8_t* data, size_t len,
+                          uint32_t generation, uint32_t crc) {
     if (!real_write) {
         real_write = (WriteFunc)dlsym(RTLD_NEXT, "write");
     }
@@ -385,16 +388,30 @@ static int write_png_file(const uint8_t* data, size_t len) {
     }
 
     /* 3. Atomic swap: rename temp symlink over canonical path */
+    // Bulk flash I/O and preparation must not hold the receive queue lock.
+    // Only the final publication is serialized with Identify/reset.
+    pthread_mutex_lock(&worker_mutex);
+    if (generation != worker_generation || worker_shutdown) {
+        pthread_mutex_unlock(&worker_mutex);
+        unlink(tmp_link);
+        unlink(new_path);
+        return -1;
+    }
     if (rename(tmp_link, COVERART_FILE) != 0) {
+        pthread_mutex_unlock(&worker_mutex);
         LOG_ERROR(LOG_MODULE, "rename(%s, %s) failed: %d", tmp_link, COVERART_FILE, errno);
         unlink(tmp_link);
         return -1;
     }
 
-    /* 4. Remove old slot file (ignore errors - may not exist on first run) */
-    unlink(old_path);
-
     g_coverart.slot = new_slot;
+    g_coverart.last_crc = crc;
+    g_coverart.last_generation = generation;
+    g_coverart.images_found++;
+    write_coverart_notify(crc);
+    pthread_mutex_unlock(&worker_mutex);
+    /* 4. Remove old slot outside the receive queue lock. */
+    unlink(old_path);
     return 0;
 }
 
@@ -454,7 +471,10 @@ static int save_artwork(const uint8_t* data, size_t len, uint32_t generation) {
 
     /* CRC check for deduplication */
     uint32_t crc = crc32_bytes(data, len);
-    if (crc == g_coverart.last_crc) {
+    pthread_mutex_lock(&worker_mutex);
+    int same_image = crc == g_coverart.last_crc && generation == g_coverart.last_generation;
+    pthread_mutex_unlock(&worker_mutex);
+    if (same_image) {
         return 1;  /* Same image, already saved */
     }
 
@@ -532,27 +552,14 @@ static int save_artwork(const uint8_t* data, size_t len, uint32_t generation) {
     }
     free(resized);
 
-    /* A slow decode from a retired Identify generation must never overwrite
-     * or notify the new session. Reset and publication share this lock. */
-    pthread_mutex_lock(&worker_mutex);
-    if (generation != worker_generation) {
-        pthread_mutex_unlock(&worker_mutex);
-        free(png);
-        return 0;
-    }
-    if (write_png_file(png, png_len) == 0) {
-        g_coverart.last_crc = crc;
-        g_coverart.images_found++;
+    if (write_png_file(png, png_len, generation, crc) == 0) {
         LOG_INFO(LOG_MODULE, "Saved PNG #%d: %s (%zu bytes)",
                  g_coverart.images_found, COVERART_FILE, png_len);
 
-        /* Write bus notification for Java watcher */
-        write_coverart_notify(crc);
     } else {
         LOG_ERROR(LOG_MODULE, "Failed to write artwork");
     }
 
-    pthread_mutex_unlock(&worker_mutex);
     free(png);
     return 1;
 }

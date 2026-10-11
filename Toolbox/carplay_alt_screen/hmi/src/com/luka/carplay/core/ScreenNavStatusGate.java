@@ -52,11 +52,13 @@ public final class ScreenNavStatusGate {
             if (current == null) return;
 
             if (cs != clusterService || gate == null || current != gate) {
+                GatedCombiService previous = gate;
                 if (current instanceof GatedCombiService) {
                     gate = (GatedCombiService) current;
                 } else {
                     gate = new GatedCombiService(current);
                 }
+                if (previous != null && previous != gate) previous.retire();
                 gate.setRouteGuidanceBlocked(desiredRouteBlocked);
                 gate.setCurrentPositionInfoBlocked(desiredCurrentPositionBlocked);
                 if (current != gate) cs.setCombiBAPListenerCombiService(gate);
@@ -115,8 +117,7 @@ public final class ScreenNavStatusGate {
             ClusterService cs, CombiBAPServiceNavi incoming) {
         if (incoming == null) {
             if (cs == clusterService && gate != null) {
-                try { gate.setRouteGuidanceBlocked(false); } catch (Throwable t) { }
-                try { gate.setCurrentPositionInfoBlocked(false); } catch (Throwable t) { }
+                try { gate.retire(); } catch (Throwable t) { }
                 clusterService = null;
                 gate = null;
                 appliedRouteBlocked = false;
@@ -132,7 +133,7 @@ public final class ScreenNavStatusGate {
             next = new GatedCombiService(incoming);
         }
         if (gate != null && gate != next) {
-            try { gate.setRouteGuidanceBlocked(false); } catch (Throwable t) { }
+            try { gate.retire(); } catch (Throwable t) { }
         }
         clusterService = cs;
         gate = next;
@@ -147,13 +148,12 @@ public final class ScreenNavStatusGate {
 
     /** Single owner of the native CombiBAP wrapper for both the cluster module and RGI. */
     public static synchronized boolean setRouteGuidanceBlocked(boolean blocked) {
-        boolean changed = desiredRouteBlocked != blocked;
         desiredRouteBlocked = blocked;
+        if (blocked && gate != null) gate.setRouteGuidanceBlocked(true);
         if (!blocked) {
             desiredCurrentPositionBlocked = false;
-            if (gate != null) gate.setCurrentPositionInfoBlocked(false);
         }
-        if (gate == null || changed || appliedRouteBlocked != blocked) scheduleInstallLocked();
+        scheduleInstallLocked();
         return gate != null && appliedRouteBlocked == blocked && !installScheduled;
     }
 
@@ -163,7 +163,8 @@ public final class ScreenNavStatusGate {
      * service-field mutation. */
     public static synchronized void setCurrentPositionInfoBlocked(boolean blocked) {
         desiredCurrentPositionBlocked = blocked;
-        if (gate != null) gate.setCurrentPositionInfoBlocked(blocked);
+        if (blocked && gate != null) gate.setCurrentPositionInfoBlocked(true);
+        scheduleInstallLocked();
     }
 
     /** Exact stock-service availability edge, after prepareCombiBAPService + stock updateAll.
@@ -179,6 +180,7 @@ public final class ScreenNavStatusGate {
         }
         if (current == null) {
             if (cs == clusterService) {
+                if (gate != null) gate.retire();
                 clusterService = null;
                 gate = null;
                 GatedCombiService.publishMapVisibility(false);

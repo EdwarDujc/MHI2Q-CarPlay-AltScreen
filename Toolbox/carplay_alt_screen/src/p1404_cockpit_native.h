@@ -53,8 +53,15 @@ int  p1404_cockpit_native_complete_start(void *receiver, void **stream);
 int  p1404_cockpit_native_attach(void *receiver, void *stream);
 void p1404_cockpit_native_detach(void *receiver, void *stream);
 /* Set true immediately before ProcessFrames; clear before StopSession.
- * Clearing joins any recovery command submission without joining the monitor. */
+ * Clearing cancels future submissions without waiting on an OEM command. */
 void p1404_cockpit_native_processing(void *receiver, void *stream, int live);
+/* Recheck after acquiring the lifecycle lease; it may have waited for stop. */
+int p1404_cockpit_native_command_current(void *receiver, void *stream,
+                                       uint32_t generation);
+/* Retain under the mapping lock, before releasing it to call stock code.
+ * The submitter must release the receiver after its stock call returns. */
+int p1404_cockpit_native_command_acquire(void *receiver, void *stream,
+                                       uint32_t generation);
 
 /* Screen calls reached from stock CScreenRender::config. The private config
  * scope replaces its static window group with DisplayManager registration;

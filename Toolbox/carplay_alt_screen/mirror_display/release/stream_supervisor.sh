@@ -23,7 +23,7 @@ altscreen_display_precheck() {
         echo "DISPLAY_PRECHECK=UNAVAILABLE reason=pidin_missing" >&2
         return 0
     fi
-    alts_display_processes=$(pidin ar 2>/dev/null) || {
+    alts_display_processes=$(pidin ar 9>&- 2>/dev/null) || {
         echo "DISPLAY_PRECHECK=FAILED reason=process_inventory_unavailable" >&2
         return 1
     }
@@ -56,25 +56,24 @@ STOP="$ROOT/stop_vehicle.sh"
 [ -x "$START" ] || { echo "ERROR missing start_vehicle.sh" >&2; exit 2; }
 [ -x "$STOP" ] || { echo "ERROR missing stop_vehicle.sh" >&2; exit 2; }
 
-if [ -f "$PIDFILE" ]; then
-  OLD=$(cat "$PIDFILE" 2>/dev/null || true)
-  if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then
-    # Explicit repeated START may rearm a renderer which reached its bounded
-    # restart ceiling. Its own atomic lock prevents duplicate instances.
-    if [ -x "$ROOT/rgi_supervisor.sh" ]; then
-      /bin/sh "$ROOT/rgi_supervisor.sh" >> "$LOGFILE" 2>&1 &
-    fi
-    echo "STREAM_SUPERVISOR=ALREADY_RUNNING pid=$OLD"
-    exit 0
+if [ "${1:-}" != --lease-held ]; then
+  # Repeated START can rearm RGI independently; its own lease elects one owner.
+  if [ -s "$PIDFILE" ] && [ -x "$ROOT/rgi_supervisor.sh" ]; then
+    /bin/sh "$ROOT/rgi_supervisor.sh" 9>&- >> "$LOGFILE" 2>&1 &
   fi
-  rm -f "$PIDFILE"
+  LEASE_BIN=${ALT111_STREAM_LEASE_BIN:-$ROOT/carplay-alt111-mirror-display}
+  [ -x "$LEASE_BIN" ] || { echo "STREAM_SUPERVISOR=FAIL reason=lease_binary_missing" >&2; exit 2; }
+  LD_PRELOAD= exec "$LEASE_BIN" --stream-supervisor "$ROOT/stream_supervisor.sh"
 fi
+exec 9>&9 || exit 2
+[ "${ALT111_STREAM_SUPERVISOR_OWNER:-}" = "$$" ] || exit 2
 
 echo "$$" > "$PIDFILE"
 : > "$LOGFILE"
 echo "STREAM_SUPERVISOR=STARTED pid=$$ policy=private111_stable_frames_no_fixed_delay marker=$STREAM_READY" >> "$LOGFILE"
 
-read_stream_key() {
+read_stream_key() (
+  exec 9>&-
   [ -s "$STREAM_READY" ] || return 1
   producer_pid=$(sed -n 's/^pid=//p' "$STREAM_READY" 2>/dev/null | head -n 1)
   generation=$(sed -n 's/^generation=//p' "$STREAM_READY" 2>/dev/null | head -n 1)
@@ -90,19 +89,20 @@ read_stream_key() {
   [ -n "$cookie" ] || return 1
   kill -0 "$producer_pid" 2>/dev/null || return 1
   printf '%s:%s:%s\n' "$producer_pid" "$generation" "$cookie"
-}
+)
 
-mirror_running() {
+mirror_running() (
+  exec 9>&-
   [ -s "$MIRROR_PID" ] || return 1
   mpid=$(cat "$MIRROR_PID" 2>/dev/null || true)
   case "$mpid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$mpid" 2>/dev/null
-}
+)
 
 stop_display() {
-  rm -f "$ACTIVE" 2>/dev/null || true
-  ALT111_SUPERVISOR_CHILD=1 /bin/sh "$STOP" >> "$LOGFILE" 2>&1 || true
-  rm -f "$STATEFILE" 2>/dev/null || true
+  rm -f "$ACTIVE" 9>&- 2>/dev/null || true
+  ALT111_SUPERVISOR_CHILD=1 /bin/sh "$STOP" 9>&- >> "$LOGFILE" 2>&1 || true
+  rm -f "$STATEFILE" 9>&- 2>/dev/null || true
 }
 
 cleanup() {
@@ -110,18 +110,20 @@ cleanup() {
   if [ -n "$RGI_PID" ]; then
     # A completed child may have been reaped automatically. Never signal its
     # historical PID if the renderer supervisor no longer owns that marker.
-    if [ "$(cat "$TMP_ROOT/altscreen_rgi_supervisor.pid" 2>/dev/null || true)" = "$RGI_PID" ]; then
+    if [ "$(cat "$TMP_ROOT/altscreen_rgi_supervisor.pid" 9>&- 2>/dev/null || true)" = "$RGI_PID" ]; then
       kill -TERM "$RGI_PID" 2>/dev/null || true
     fi
     wait "$RGI_PID" 2>/dev/null || true
   fi
   stop_display
-  rm -f "$PIDFILE" 2>/dev/null || true
+  if [ "$(cat "$PIDFILE" 9>&- 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$PIDFILE" 9>&- 2>/dev/null || true
+  fi
   echo "STREAM_SUPERVISOR=STOPPED pid=$$" >> "$LOGFILE" 2>/dev/null || true
 }
 RGI_PID=""
 if [ -x "$ROOT/rgi_supervisor.sh" ]; then
-  /bin/sh "$ROOT/rgi_supervisor.sh" >> "$LOGFILE" 2>&1 &
+  /bin/sh "$ROOT/rgi_supervisor.sh" 9>&- >> "$LOGFILE" 2>&1 &
   RGI_PID=$!
 fi
 trap cleanup 0
@@ -129,7 +131,7 @@ trap 'exit 0' 1 2 15
 
 while :; do
   KEY=$(read_stream_key 2>/dev/null || true)
-  OLD_KEY=$(cat "$STATEFILE" 2>/dev/null || true)
+  OLD_KEY=$(cat "$STATEFILE" 9>&- 2>/dev/null || true)
 
   if [ -n "$KEY" ]; then
     if [ -n "$OLD_KEY" ] && [ "$OLD_KEY" != "$KEY" ]; then
@@ -146,7 +148,7 @@ while :; do
       echo "STREAM_READY key=$KEY reason=$RESTART_REASON action=START_DISPLAY recover_current_session=1" >> "$LOGFILE"
       touch "$ACTIVE"
       start_rc=0
-      if ALT111_MIRROR_RESTART_REASON="$RESTART_REASON" ALT111_STREAM_SUPERVISED=1 ALT111_RECOVER_CURRENT_SESSION=1 /bin/sh "$START" >> "$LOGFILE" 2>&1; then
+      if ALT111_MIRROR_RESTART_REASON="$RESTART_REASON" ALT111_STREAM_SUPERVISED=1 ALT111_RECOVER_CURRENT_SESSION=1 /bin/sh "$START" 9>&- >> "$LOGFILE" 2>&1; then
         if ! mirror_running; then
           start_rc=3
         fi
@@ -156,11 +158,11 @@ while :; do
       if [ "$start_rc" -eq 0 ]; then
         printf '%s\n' "$KEY" > "$STATEFILE"
       else
-        rm -f "$ACTIVE" "$STATEFILE" 2>/dev/null || true
+        rm -f "$ACTIVE" "$STATEFILE" 9>&- 2>/dev/null || true
         echo "STREAM_DISPLAY_START_FAILED key=$KEY rc=$start_rc fail_open=YES" >> "$LOGFILE"
       fi
     else
-      [ -f "$ACTIVE" ] || touch "$ACTIVE"
+      [ -f "$ACTIVE" ] || touch "$ACTIVE" 9>&-
       [ "$OLD_KEY" = "$KEY" ] || printf '%s\n' "$KEY" > "$STATEFILE"
     fi
   else
@@ -170,5 +172,5 @@ while :; do
     fi
   fi
 
-  sleep 1
+  sleep 1 9>&-
 done

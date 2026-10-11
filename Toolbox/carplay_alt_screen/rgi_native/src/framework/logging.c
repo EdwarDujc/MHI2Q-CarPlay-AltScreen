@@ -89,6 +89,35 @@ static const char* level_str(log_level_t level) {
     }
 }
 
+/* QNX's flat /dev/shmem namespace can reject rename. Only the log writer
+ * touches these files, so copy+unlink is safe there and keeps bounded history. */
+static int move_log_file(const char *from, const char *to) {
+    char buffer[4096];
+    int in, out, ok = 1;
+    if (rename(from, to) == 0) return 0;
+    in = open(from, O_RDONLY);
+    if (in < 0) return -1;
+    out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) { close(in); return -1; }
+    for (;;) {
+        ssize_t n = read(in, buffer, sizeof(buffer));
+        size_t offset = 0;
+        if (n == 0) break;
+        if (n < 0) { if (errno == EINTR) continue; ok = 0; break; }
+        while (offset < (size_t)n) {
+            ssize_t w = do_write(out, buffer + offset, (size_t)n - offset);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) { ok = 0; break; }
+            offset += (size_t)w;
+        }
+        if (!ok) break;
+    }
+    close(in);
+    if (close(out) != 0) ok = 0;
+    if (!ok) { unlink(to); return -1; }
+    return unlink(from);
+}
+
 static void rotate_logs(void) {
     if (!g_log.config.log_path || g_log.config.max_files <= 0) return;
 
@@ -103,12 +132,12 @@ static void rotate_logs(void) {
     for (int i = g_log.config.max_files - 1; i >= 1; i--) {
         snprintf(old_path, sizeof(old_path), "%s.%d", g_log.config.log_path, i);
         snprintf(new_path, sizeof(new_path), "%s.%d", g_log.config.log_path, i + 1);
-        (void)rename(old_path, new_path);
+        (void)move_log_file(old_path, new_path);
     }
 
     /* Current becomes .1 */
     snprintf(new_path, sizeof(new_path), "%s.1", g_log.config.log_path);
-    (void)rename(g_log.config.log_path, new_path);
+    (void)move_log_file(g_log.config.log_path, new_path);
 }
 
 static void check_rotation(void) {
@@ -125,7 +154,8 @@ static void check_rotation(void) {
         close(g_log.fd);
         g_log.fd = -1;
         rotate_logs();
-        g_log.fd = open(g_log.config.log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        // Even if archiving fails, reopen empty; append would defeat the cap.
+        g_log.fd = open(g_log.config.log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     }
 }
 

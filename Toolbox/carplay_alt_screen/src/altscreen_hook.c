@@ -438,6 +438,7 @@ static int bearer_claim(int fd, int candidate, int kind, int flags,
             }
             if (bearer_raw_busy_locked(fd)) {
                 bearer_tx_unlock();
+                p1404_lock_wait_yield();
                 continue;
             }
             for (i = 0; i < BEARER_TX_SLOTS; ++i)

@@ -1830,10 +1830,12 @@ int p111_frame_tap_get_progress(
 void p111_direct_tap_stream_end(void *stream) {
     unsigned i;
     int ended_current = 0;
+    uint32_t ended_generation = 0;
 
     tap_lock();
     if (!stream || g_stream == stream) {
         ended_current = 1;
+        ended_generation = g_generation;
         if (g_h264) {
             __sync_synchronize();
             g_h264->active = 0;
@@ -1867,7 +1869,12 @@ void p111_direct_tap_stream_end(void *stream) {
      */
     if (ended_current) {
         linearizer_lock();
-        linearizer_shutdown_locked();
+        tap_lock();
+        // A new stream may have initialized the linearizer while we waited.
+        // New frame reads cannot start while we hold linearizer_lock.
+        ended_current = !g_stream && g_generation == ended_generation;
+        tap_unlock();
+        if (ended_current) linearizer_shutdown_locked();
         linearizer_unlock();
     }
 }

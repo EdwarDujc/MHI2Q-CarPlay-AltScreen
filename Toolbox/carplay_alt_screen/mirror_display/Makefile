@@ -7,7 +7,7 @@ STATIC_STDCXX ?= $(QNX_TARGET)/armle-v7/lib/gcc/4.4.2/libstdc++.a
 SOURCES = src/main.cpp src/private111_direct_source.cpp src/cluster_video_display.cpp src/mhi2q_backend.cpp src/gl_renderer.cpp src/state_snapshot.cpp src/startup_logo.cpp src/startup_logo_data.S
 LOGO_ASSET = assets/logo_frames.z
 CXXFLAGS += -O2 -Wall -Wextra -fno-exceptions -fno-rtti
-LDFLAGS += -lEGL -lGLESv2 -lm -l:libz.a
+LDFLAGS += -lEGL -lGLESv2 -lm -l:libz.a -lsocket
 .PHONY: all clean
 all: $(TARGET)
 $(BUILD_DIR):

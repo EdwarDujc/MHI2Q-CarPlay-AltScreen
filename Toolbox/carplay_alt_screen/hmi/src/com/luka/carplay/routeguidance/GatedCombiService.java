@@ -40,57 +40,121 @@ public class GatedCombiService implements CombiBAPServiceNavi {
     /** Route-data ownership. BAPBridge is the only writer for the maneuver FctIDs while CarPlay RGI
      * is active.  Scale and altitude are NOT gated on this branch: the cluster shows the stock native
      * map, so its native scale/altitude readouts in the lower bar stay visible. */
-    public void setRouteGuidanceBlocked(boolean active) {
+    public synchronized void setRouteGuidanceBlocked(boolean active) {
+        if (blockRouteGuidance && !active) markReplay(false);
         blockRouteGuidance = active;
+        if (!active) replay(false);
     }
 
-    public void setCurrentPositionInfoBlocked(boolean blocked) {
+    public synchronized void setCurrentPositionInfoBlocked(boolean blocked) {
+        if (blockCurrentPositionInfo && !blocked) markReplay(true);
         blockCurrentPositionInfo = blocked;
+        if (!blocked) replay(true);
     }
 
-    /* GATED ROUTE-GUIDANCE METHODS */
-    public void updateRGStatus(int a) {
-        if (!blockRouteGuidance) real.updateRGStatus(a);
+    private void markReplay(boolean position) {
+        for (int i=0; i<latest.length; i++)
+            if ((i==3 || i>=8) == position && latest[i] != null) replayPending[i] = true;
     }
 
-    public void updateActiveRGType(int a) {
-        if (!blockRouteGuidance) real.updateActiveRGType(a);
+    public synchronized void retire() {
+        blockRouteGuidance = blockCurrentPositionInfo = false;
+        for (int i=0; i<latest.length; i++) { latest[i]=null; replayPending[i]=false; }
     }
 
-    public void updateDistanceToNextManeuver(int a, int b, boolean c, int d) {
-        if (!blockRouteGuidance) real.updateDistanceToNextManeuver(a, b, c, d);
+    /* Bounded OEM snapshot; mutations and replay run on NavigationJobs. */
+    private final Object[][] latest = new Object[12][];
+    private final boolean[] replayPending = new boolean[12];
+    public synchronized void updateRGStatus(int a) {
+        latest[0] = new Object[]{new Integer(a)};
+        if (!blockRouteGuidance) { real.updateRGStatus(a); replayPending[0] = false; }
     }
 
-    public void updateCurrentPositionInfo(String s) {
-        if (!blockCurrentPositionInfo) real.updateCurrentPositionInfo(s);
+    public synchronized void updateActiveRGType(int a) {
+        latest[1] = new Object[]{new Integer(a)};
+        if (!blockRouteGuidance) { real.updateActiveRGType(a); replayPending[1] = false; }
     }
 
-    public void updateManeuverDescriptor(CombiBAPNaviManeuverDescriptor[] a) {
-        if (!blockRouteGuidance) real.updateManeuverDescriptor(a);
+    public synchronized void updateDistanceToNextManeuver(int a, int b, boolean c, int d) {
+        latest[2] = new Object[]{new Integer(a), new Integer(b), (c ? Boolean.TRUE : Boolean.FALSE), new Integer(d)};
+        if (!blockRouteGuidance) { real.updateDistanceToNextManeuver(a,b,c,d); replayPending[2] = false; }
     }
 
-    public void updateLaneGuidance(boolean a, CombiBAPNaviLaneGuidanceData[] b) {
-        if (!blockRouteGuidance) real.updateLaneGuidance(a, b);
+    public synchronized void updateCurrentPositionInfo(String s) {
+        latest[3] = new Object[]{s};
+        if (!blockCurrentPositionInfo) { real.updateCurrentPositionInfo(s); replayPending[3] = false; }
     }
 
-    public void updateExitView(int a, int b) {
-        if (!blockRouteGuidance) real.updateExitView(a, b);
+    public synchronized void updateManeuverDescriptor(CombiBAPNaviManeuverDescriptor[] a) {
+        latest[4] = new Object[]{a == null ? null : (CombiBAPNaviManeuverDescriptor[])a.clone()};
+        if (!blockRouteGuidance) { real.updateManeuverDescriptor(a); replayPending[4] = false; }
     }
 
-    public void updateManeuverState(int a) {
-        if (!blockRouteGuidance) real.updateManeuverState(a);
+    public synchronized void updateLaneGuidance(boolean a, CombiBAPNaviLaneGuidanceData[] b) {
+        latest[5] = new Object[]{(a ? Boolean.TRUE : Boolean.FALSE), b == null ? null : (CombiBAPNaviLaneGuidanceData[])b.clone()};
+        if (!blockRouteGuidance) { real.updateLaneGuidance(a,b); replayPending[5] = false; }
+    }
+
+    public synchronized void updateExitView(int a, int b) {
+        latest[6] = new Object[]{new Integer(a), new Integer(b)};
+        if (!blockRouteGuidance) { real.updateExitView(a,b); replayPending[6] = false; }
+    }
+
+    public synchronized void updateManeuverState(int a) {
+        latest[7] = new Object[]{new Integer(a)};
+        if (!blockRouteGuidance) { real.updateManeuverState(a); replayPending[7] = false; }
+    }
+
+    public synchronized void updateTurnToInfo(String a, String b) {
+        latest[8] = new Object[]{a, b};
+        if (!blockCurrentPositionInfo) { real.updateTurnToInfo(a,b); replayPending[8] = false; }
+    }
+
+    public synchronized void updateDistanceToDestination(int a, int b, boolean c) {
+        latest[9] = new Object[]{new Integer(a), new Integer(b), (c ? Boolean.TRUE : Boolean.FALSE)};
+        if (!blockCurrentPositionInfo) { real.updateDistanceToDestination(a,b,c); replayPending[9] = false; }
+    }
+
+    public synchronized void updateTimeToDestination(int a, int b, long c) {
+        latest[10] = new Object[]{new Integer(a), new Integer(b), new Long(c)};
+        if (!blockCurrentPositionInfo) { real.updateTimeToDestination(a,b,c); replayPending[10] = false; }
+    }
+
+    public synchronized void updateDestinationInfo(CombiBAPDestinationInfo a) {
+        latest[11] = new Object[]{a};
+        if (!blockCurrentPositionInfo) { real.updateDestinationInfo(a); replayPending[11] = false; }
+    }
+
+    private void replay(boolean position) {
+        for (int i=0; i<latest.length; i++) {
+            if (!replayPending[i] || latest[i] == null) continue;
+            boolean isPosition = i==3 || i>=8;
+            if (isPosition != position || (position ? blockCurrentPositionInfo : blockRouteGuidance)) continue;
+            Object[] v = latest[i];
+            try {
+                switch (i) {
+                case 0: real.updateRGStatus(((Integer)v[0]).intValue()); break;
+                case 1: real.updateActiveRGType(((Integer)v[0]).intValue()); break;
+                case 2: real.updateDistanceToNextManeuver(((Integer)v[0]).intValue(), ((Integer)v[1]).intValue(), ((Boolean)v[2]).booleanValue(), ((Integer)v[3]).intValue()); break;
+                case 3: real.updateCurrentPositionInfo((String)v[0]); break;
+                case 4: real.updateManeuverDescriptor((CombiBAPNaviManeuverDescriptor[])v[0]); break;
+                case 5: real.updateLaneGuidance(((Boolean)v[0]).booleanValue(), (CombiBAPNaviLaneGuidanceData[])v[1]); break;
+                case 6: real.updateExitView(((Integer)v[0]).intValue(), ((Integer)v[1]).intValue()); break;
+                case 7: real.updateManeuverState(((Integer)v[0]).intValue()); break;
+                case 8: real.updateTurnToInfo((String)v[0], (String)v[1]); break;
+                case 9: real.updateDistanceToDestination(((Integer)v[0]).intValue(), ((Integer)v[1]).intValue(), ((Boolean)v[2]).booleanValue()); break;
+                case 10: real.updateTimeToDestination(((Integer)v[0]).intValue(), ((Integer)v[1]).intValue(), ((Long)v[2]).longValue()); break;
+                case 11: real.updateDestinationInfo((CombiBAPDestinationInfo)v[0]); break;
+                }
+                replayPending[i] = false;
+            } catch (Throwable t) { logDisplayFailure(t); }
+        }
     }
 
     /* All other methods: pure delegation */
     public void showInitializingScreen() { real.showInitializingScreen(); }
     public void hideInitializingScreen() { real.hideInitializingScreen(); }
     public void updateCompassInfo(int a, int b) { real.updateCompassInfo(a, b); }
-    public void updateTurnToInfo(String a, String b) {
-        if (!blockCurrentPositionInfo) real.updateTurnToInfo(a, b); }
-    public void updateDistanceToDestination(int a, int b, boolean c) {
-        if (!blockCurrentPositionInfo) real.updateDistanceToDestination(a, b, c); }
-    public void updateTimeToDestination(int a, int b, long c) {
-        if (!blockCurrentPositionInfo) real.updateTimeToDestination(a, b, c); }
     public void updateTMCInfoMessages(CombiBAPTMCInfoMessage[] a) {
         real.updateTMCInfoMessages(a); }
     public void updateLastDestinationsList(CombiBAPDestinationListEntry[] a) {
@@ -135,8 +199,6 @@ public class GatedCombiService implements CombiBAPServiceNavi {
     public void updateMapScale(int a, boolean b, int c, int d, boolean e) {
         real.updateMapScale(a, b, c, d, e);   /* native map scale — not gated on this branch */
     }
-    public void updateDestinationInfo(CombiBAPDestinationInfo a) {
-        if (!blockCurrentPositionInfo) real.updateDestinationInfo(a); }
     public void updateAltitude(int a, int b) {
         real.updateAltitude(a, b);            /* native altitude — not gated on this branch */
     }

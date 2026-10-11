@@ -387,7 +387,13 @@ public class RouteGuidance implements CarplayBus.Listener {
      * Stop route guidance.
      */
     public void stop() {
-        if (!running) return;
+        if (!running) {
+            com.luka.carplay.core.ScreenModule.clearViewAreaModeListener(viewAreaModeListener);
+            com.luka.carplay.core.ScreenModule.clearInfoModeListener(infoModeListener);
+            com.luka.carplay.cluster.ClusterLayerController.clearViewportListener(viewportListener);
+            if (bap != null) bap.setPresentationListener(null);
+            return;
+        }
         CarplayBus.getInstance().off(CarplayBus.EVT_RGD_UPDATE);
         Thread worker;
         synchronized (presentationLock) {
@@ -410,8 +416,10 @@ public class RouteGuidance implements CarplayBus.Listener {
             routeWantsActive = false;
             com.luka.carplay.core.ScreenModule.setNavActive(false);
             if (bap != null) {
-                bap.onStop();
-                bap.onShutdown();
+                try { bap.onStop(); }
+                catch (Throwable t) { Log.e(TAG, "RGI stop reset failed", t); }
+                try { bap.onShutdown(); }
+                catch (Throwable t) { Log.e(TAG, "RGI shutdown failed", t); }
                 bap.setPresentationListener(null);
             }
         }
@@ -427,6 +435,10 @@ public class RouteGuidance implements CarplayBus.Listener {
 
     public boolean isRunning() {
         return running;
+    }
+
+    public synchronized void refreshServices() {
+        if (bap != null) bap.refreshClusterAccess();
     }
 
     /** REPLACE mode: cancel stock nav + shut RG gate for the whole CarPlay session

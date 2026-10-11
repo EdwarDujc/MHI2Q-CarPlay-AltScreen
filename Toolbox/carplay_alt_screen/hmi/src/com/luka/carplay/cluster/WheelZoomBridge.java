@@ -154,8 +154,8 @@ public final class WheelZoomBridge {
     }
 
     public static synchronized void reset() {
-        haveMagnification = false;
-        lastMagnification = 0;
+        // Keep the last OEM absolute value as the next session's baseline.
+        // Only a JVM with no OEM callback needs to consume a seed callback.
         try { new File(EVENT_FILE).delete(); } catch (Throwable ignored) {}
         diag("WHEEL_ZOOM_RESET queue=cleared epoch=" + eventEpoch
             + " sequence_preserved=" + sequence

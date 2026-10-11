@@ -6,7 +6,8 @@ enum alt_session_operation {
     ALT_SESSION_SETUP,
     ALT_SESSION_START,
     ALT_SESSION_CONTROL,
-    ALT_SESSION_TEARDOWN
+    ALT_SESSION_TEARDOWN,
+    ALT_SESSION_COMMAND
 };
 
 enum alt_session_admission {

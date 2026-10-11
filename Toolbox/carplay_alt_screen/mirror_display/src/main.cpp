@@ -333,7 +333,8 @@ static OemMapPlacement load_session_map_placement() {
     p.state_complete = have_view && have_layout;
     if (!p.state_complete)
         return p;
-    if (!strstr(p.layout, "LayoutMIB2HighB9"))
+    if (!strstr(p.layout, "LayoutMIB2HighB9") &&
+        !strstr(p.layout, "LayoutMIB2HighQ7"))
         return p;
 
     if (strcmp(p.view, "FULL") == 0) {
@@ -705,7 +706,10 @@ static int run_sink_grid(bool verbose) {
     return 0;
 }
 
+#include "stream_supervisor_lease.h"
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--stream-supervisor"))
+        return stream_supervisor_exec(argv[2]);
     bool verbose = false;
     bool sink_test_grid = false;
     const char *grid_env = getenv("ALT111_SINK_TEST_GRID");

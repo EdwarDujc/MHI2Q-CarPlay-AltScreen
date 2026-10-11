@@ -12,6 +12,7 @@ static struct {
     unsigned users;
     unsigned depth;
     unsigned teardown_depth;
+    unsigned command_depth;
     int full_completed;
 } session_guards[ALT_SESSION_GUARD_SLOTS];
 static volatile unsigned session_guards_lock;
@@ -63,13 +64,27 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
                 return operation == ALT_SESSION_TEARDOWN ?
                     ALT_SESSION_REENTRANT_STOP : ALT_SESSION_CLOSED;
             }
+            // An OEM synchronous command callback may reenter outer teardown.
+            // It must return to the submitter before its HTTP channel is freed.
+            if (session_guards[slot].command_depth && operation != ALT_SESSION_COMMAND) {
+                session_guards_release();
+                return ALT_SESSION_REFUSED;
+            }
             session_guards[slot].owner = self;
             ++session_guards[slot].depth;
             if (operation == ALT_SESSION_TEARDOWN)
                 ++session_guards[slot].teardown_depth;
+            if (operation == ALT_SESSION_COMMAND)
+                ++session_guards[slot].command_depth;
             lease->entered = 1;
             session_guards_release();
             return ALT_SESSION_ENTERED;
+        }
+        // Monitor commands never queue behind lifecycle teardown/SETUP. This
+        // avoids a fence -> worker join -> command admission cycle.
+        if (operation == ALT_SESSION_COMMAND) {
+            session_guards_release();
+            return ALT_SESSION_REFUSED;
         }
         session_guards_release();
         ++lease->waited;
@@ -87,6 +102,8 @@ void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed
         if (full_completed) session_guards[slot].full_completed = 1;
         if (lease->operation == ALT_SESSION_TEARDOWN)
             --session_guards[slot].teardown_depth;
+        if (lease->operation == ALT_SESSION_COMMAND)
+            --session_guards[slot].command_depth;
         if (!--session_guards[slot].depth) session_guards[slot].owner = 0;
     }
     /* No permanent pointer tombstone: once all overlapping calls have left,

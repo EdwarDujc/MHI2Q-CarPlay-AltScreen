@@ -56,9 +56,14 @@ trap cleanup 0
 trap 'exit 0' 1 2 15
 printf '%s\n' "$OWNER" > "$PIDFILE" || { log "RGI_SUPERVISOR=FAIL stage=pid_publish"; exit 2; }
 failures=0
+epoch_seconds() {
+  value=$(date +%s 2>/dev/null) || value=""
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$value"
+}
 log "RGI_SUPERVISOR=STARTED owner=$OWNER restart_limit=$MAX_RESTARTS"
 while [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" ]; do
-  started=$(date +%s)
+  started=$(epoch_seconds) || started=""
   (cd "${BIN%/*}" && LD_PRELOAD= exec "$BIN") >> "$LOG" 2>&1 &
   child=$!
   printf '%s\n' "$child" > "$CHILDFILE" || { log "RGI_SUPERVISOR=FAIL stage=child_pid_publish"; exit 2; }
@@ -67,8 +72,12 @@ while [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" 
   child=""
   rm -f "$CHILDFILE"
   [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" ] || break
-  elapsed=$(($(date +%s)-started))
-  [ "$elapsed" -lt 60 ] || failures=0
+  ended=$(epoch_seconds) || ended=""
+  elapsed=unknown
+  if [ -n "$started" ] && [ -n "$ended" ] && [ "$ended" -ge "$started" ]; then
+    elapsed=$((ended-started))
+    [ "$elapsed" -lt 60 ] || failures=0
+  fi
   failures=$((failures+1))
   log "RGI_RENDERER_EXIT rc=$rc uptime=$elapsed consecutive=$failures"
   if [ "$failures" -gt "$MAX_RESTARTS" ]; then

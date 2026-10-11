@@ -4,6 +4,7 @@
 #include "altscreen_paths.h"
 #include "p1404_observe.h"
 #include "p1404_cockpit_native.h"
+#include "p1404_session_guard.h"
 #include "private111_direct_tap.h"
 #include <stddef.h>
 #include <string.h>
@@ -1014,6 +1015,25 @@ static void alt111_event_response(int status, void *response, void *opaque) {
     alt111_event_context_release(ctx);
 }
 
+static int guarded_command_submit(airplay_send_command_fn submit,
+                                  void *receiver, cf_obj command,
+                                  struct alt111_event_context *ctx) {
+    struct alt_session_lease lease;
+    int admission = alt_session_guard_enter(receiver, ALT_SESSION_COMMAND, &lease);
+    int rc = -6752;
+    if (admission == ALT_SESSION_ENTERED) {
+        /* Teardown may have completed between the caller's retain and this
+         * lease. Recheck the mapping now that outer destruction is excluded.
+         * Bootstrap/stop callers have their own backend/lifecycle ownership. */
+        if (!ctx || !ctx->stream || !ctx->generation ||
+            ctx->event_kind == ALT111_EVENT_STOP_UI ||
+            p1404_cockpit_native_command_current(receiver, ctx->stream, ctx->generation))
+            rc = submit(receiver, command, alt111_event_response, ctx);
+    }
+    alt_session_guard_leave(&lease, 0);
+    return rc;
+}
+
 static int alt_send_cluster_event_impl(void *receiver, void *stream,
                            uint32_t generation, int event_kind, int bootstrap,
                            uint32_t event_seq) {
@@ -1061,7 +1081,12 @@ static int alt_send_cluster_event_impl(void *receiver, void *stream,
     ctx->event_value = -1;
     ctx->event_seq = event_seq;
     ctx->refs = 2; /* submit path plus callback path */
-    rc = send_command(receiver, command, alt111_event_response, ctx);
+    if (bootstrap || event_kind == ALT111_EVENT_STOP_UI) {
+        // These synchronous callers already own a lifecycle/backend reference.
+        if (!alt_airplay_retain_object(receiver)) goto done;
+    } else if (!p1404_cockpit_native_command_acquire(receiver, stream, generation)) goto done;
+    rc = guarded_command_submit(send_command, receiver, command, ctx);
+    alt_airplay_release_object(receiver);
     altscreen_log("PHASE=ALT111_EVENT_SUBMIT receiver=%p stream=%p generation=%u event=%s uuid=%s url=%s rc=%d response_callback=1",
                   receiver, stream, generation, type_name, display->uuid,
                   event_kind == ALT111_EVENT_SHOW_UI ? CP_ALT_CLUSTER_MAP_URL : "-", rc);
@@ -1150,7 +1175,9 @@ int alt_send_cluster_view_area(void *receiver, void *stream,
     ctx->event_seq = event_seq;
     ctx->refs = 2;
 
-    rc = send_command(receiver, command, alt111_event_response, ctx);
+    if (!p1404_cockpit_native_command_acquire(receiver, stream, generation)) goto done;
+    rc = guarded_command_submit(send_command, receiver, command, ctx);
+    alt_airplay_release_object(receiver);
     altscreen_log(
         "PHASE=ALT111_VIEWAREA_SUBMIT receiver=%p stream=%p generation=%u "
         "request_seq=%u uuid=%s viewAreaIndex=%d animationDurationMillis=0 "
@@ -1221,7 +1248,9 @@ int alt_send_cluster_zoom(void *receiver, void *stream,
     ctx->event_seq = event_seq;
     ctx->refs = 2;
 
-    rc = send_command(receiver, command, alt111_event_response, ctx);
+    if (!p1404_cockpit_native_command_acquire(receiver, stream, generation)) goto done;
+    rc = guarded_command_submit(send_command, receiver, command, ctx);
+    alt_airplay_release_object(receiver);
     altscreen_log(
         "PHASE=CLUSTER_ZOOM_SUBMIT receiver=%p stream=%p generation=%u "
         "seq=%u type=changeMapZoomLevel uuid=%s direction=%d action=%s rc=%d "

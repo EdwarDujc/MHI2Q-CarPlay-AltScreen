@@ -146,8 +146,6 @@ public class BAPBridge {
      * instead of guessing -- a stale forged "true" sends the stock "start route guidance"
      * sequence down the add-stopover/replace-destination-on-active-route branch of a route
      * the nav core no longer guides, and it aborts on every attempt until the next reboot. */
-    private boolean rgActiveForced = false;
-    private boolean rgActiveSaved = false;
     /* A route-absent result is definite for connect-time takeover, but a stock route may
      * still be started later in the same CarPlay session.  Re-check that result once when
      * CarPlay RGI itself activates; a successfully issued stop remains session-final. */
@@ -541,6 +539,12 @@ public class BAPBridge {
                 Log.w(TAG, "ClusterAccess: ClusterService is null");
                 return;
             }
+            if (cs == this.csRef) return;
+            if (this.csRef != null) {
+                lowerBarKomo.clear(this.csRef);
+                forceClusterRouteInfoState(false);
+                forceGfxAvailable(false);
+            }
             this.csRef = cs;
             this.komoService = cs.getKomoService();
             if (this.komoService != null) {
@@ -550,10 +554,16 @@ public class BAPBridge {
             }
 
             Log.i(TAG, "ClusterAccess init OK");
-        } catch (Exception e) {
+            if (bapSessionStarted) {
+                forceClusterRouteInfoState(true);
+                forceGfxAvailable(customRendererStarted);
+            }
+        } catch (Throwable e) {
             Log.w(TAG, "ClusterAccess setup failed (non-fatal): " + e.getMessage());
         }
     }
+
+    public void refreshClusterAccess() { initClusterAccess(); }
 
     /**
      * Force cluster acceptance flags so VC accepts RGI BAP messages.
@@ -563,20 +573,9 @@ public class BAPBridge {
 
         try {
             DSIResponseContainer container = csRef.getDSIResponseContainer();
-            if (container != null) {
-                if (active) {
-                    if (!rgActiveForced) {
-                        rgActiveSaved = container.isRgActive();
-                        rgActiveForced = true;
-                    }
-                    container.setRgActive(true);
-                } else if (rgActiveForced) {
-                    rgActiveForced = false;
-                    container.setRgActive(rgActiveSaved);
-                    Log.i(TAG, "rgActive overlay released (restored " + rgActiveSaved + ")");
-                }
-            }
-        } catch (Exception e) {
+            NativeRouteStateOverlay.apply(container, active);
+        } catch (Throwable e) {
+            Log.w(TAG, "native route-state overlay failed: " + e);
         }
 
         if (active) {
@@ -610,7 +609,7 @@ public class BAPBridge {
         if (!initialized) return false;
         try {
             takeoverEngaged = true;
-            if (csRef == null) initClusterAccess();
+            initClusterAccess();
             if (!nativeStopAttempted) {
                 nativeStopAttempted = tryStopNativeNavigation();
             }
@@ -683,9 +682,7 @@ public class BAPBridge {
              * Lazy-init cluster hooks (native stream gate).
              * Navigation singleton may not be available at init() time.
              */
-            if (csRef == null) {
-                initClusterAccess();
-            }
+            initClusterAccess();
 
             /*
              * Politely abort any in-flight native route-guidance session
@@ -864,10 +861,10 @@ public class BAPBridge {
             }
             /* CarPlay RGI no longer owns FctIDs 19/20. Keep the rest of native RG
              * gated until phone disconnect, but let stock update route text. */
-            com.luka.carplay.core.ScreenNavStatusGate.setCurrentPositionInfoBlocked(false);
-
             stopCustomRenderer(preserveSurface);
             forceClusterRouteInfoState(false);
+            // Clear owned KOMO fields before replaying the native snapshot.
+            com.luka.carplay.core.ScreenNavStatusGate.setCurrentPositionInfoBlocked(false);
             /* CarPlay session ending — release the renderer listen socket
              * (port :19800).  stopCustomRenderer keeps it bound for fast
              * route restarts within a session; full session shutdown
@@ -892,7 +889,7 @@ public class BAPBridge {
             forceGfxAvailable(false);
 
             Log.i(TAG, "Shutdown (full teardown)");
-        } catch (Exception e) {
+        } catch (Throwable e) {
             Log.e(TAG, "onShutdown error", e);
         }
     }
@@ -903,6 +900,7 @@ public class BAPBridge {
 
     public boolean update(RouteGuidance.State s) {
         if (!initialized || s == null) return false;
+        initClusterAccess();
 
         int failureSerial = rendererSendFailureSerial;
         int dirty = s.dirtyMask;
@@ -2130,7 +2128,8 @@ public class BAPBridge {
     }
 
     private synchronized void stopCustomRenderer(boolean preserveSurface) {
-        if (!preserveSurface) lowerBarKomo.clear(csRef);
+        // Surface retention belongs to the fade-out, not the lower-bar data.
+        lowerBarKomo.clear(csRef);
         try {
             /* Stop feeding, but preserve the final surface while connected: VC controls
              * its disappearance via Fct44. A route end must not clear pixels during fade-out.
