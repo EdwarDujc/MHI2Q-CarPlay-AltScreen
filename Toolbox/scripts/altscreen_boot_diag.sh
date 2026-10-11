@@ -36,13 +36,21 @@ PATH=${PATH:-/bin:/usr/bin}:/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/
 LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}:/proc/boot:/usr/lib:/armle/lib:/armle/lib/dll:/lib:/mnt/app/root/carplay-altscreen/lib:/eso/lib:/mnt/app/usr/lib:/mnt/app/armle/lib:/mnt/app/armle/lib/dll:/mnt/app/armle/usr/lib:/lib/dll
 export PATH LD_LIBRARY_PATH
 ROOT=""; INTERVAL=2; ITERATIONS=0; PROBE_SECONDS=5
+RAW_LIMIT=8388608; LOG_LIMIT=4194304; AUDIO_EVERY=5; META_EVERY=15
 if [ "${ALTSCREEN_CHAIN_TESTING:-0}" = 1 ]; then
     ROOT=${ALTSCREEN_CHAIN_ROOT:-}
     case "$ROOT" in /tmp/*|/var/tmp/*) ;; *) exit 2 ;; esac
     INTERVAL=${ALTS_DIAG_INTERVAL:-0.1}
     ITERATIONS=${ALTS_DIAG_ITERATIONS:-5}
     PROBE_SECONDS=${ALTS_DIAG_PROBE_SECONDS:-1}
+    RAW_LIMIT=${ALTS_DIAG_RAW_LIMIT:-8388608}
+    LOG_LIMIT=${ALTS_DIAG_LOG_LIMIT:-4194304}
+    AUDIO_EVERY=${ALTS_DIAG_AUDIO_EVERY:-5}
+    META_EVERY=${ALTS_DIAG_META_EVERY:-15}
 fi
+for numeric in "$RAW_LIMIT" "$LOG_LIMIT" "$AUDIO_EVERY" "$META_EVERY"; do
+    case "$numeric" in ''|*[!0-9]*|0) exit 2 ;; esac
+done
 ENABLED="$ROOT/mnt/app/root/carplay-altscreen/state/diagnostics.enabled"
 [ -f "$ENABLED" ] || exit 0
 # Probe execution, not just command presence: mounted commands can still lack
@@ -116,9 +124,20 @@ select_oem_geometry_history_source() {
 select_oem_displaymanager_api_source() {
     printf '%s\n' "$ROOT/tmp/carplay-oem-displaymanager-read-api.log"
 }
-flat_plain_append() {
-    cat "$1" >> "$2"
-}
+flat_plain_append() (
+    # One writer per stream. Keep the latest four segments instead of stopping
+    # capture at a size cap; the unfiltered system stream remains available.
+    append_source=$1; append_target=$2
+    if [ -f "$append_target" ] && [ "$(wc -c < "$append_target")" -ge "$LOG_LIMIT" ]; then
+        rm -f "$append_target.3" || exit 1
+        for segment in 2 1; do
+            next=$((segment + 1))
+            [ ! -f "$append_target.$segment" ] || mv "$append_target.$segment" "$append_target.$next" || exit 1
+        done
+        mv "$append_target" "$append_target.1" || exit 1
+    fi
+    cat "$append_source" >> "$append_target"
+)
 flat_read_cursor() {
     flat_cursor_path=$1
     [ -f "$flat_cursor_path" ] || { echo 0; return 0; }
@@ -145,7 +164,15 @@ flat_capture_delta() {
     [ "$flat_size" -ge "$flat_offset" ] || flat_offset=0
     if [ "$flat_size" -gt "$flat_offset" ]; then
         tail -c "+$((flat_offset + 1))" "$flat_source" > "$flat_temp" 2>/dev/null || { echo "$flat_offset"; return 0; }
-        if flat_plain_append "$flat_temp" "$flat_target" 2>/dev/null; then flat_offset=$flat_size; fi
+        # tail can include bytes appended after the size sample. Advance by
+        # the bytes actually copied, or the next poll duplicates those bytes.
+        flat_bytes=$(wc -c < "$flat_temp")
+        if flat_plain_append "$flat_temp" "$flat_target" 2>/dev/null; then
+            flat_offset=$((flat_offset + flat_bytes))
+            if [ "$flat_source" = "${flat_system:-}" ]; then flat_audio_capture "$flat_temp"; fi
+        else
+            printf 'CAPTURE_WRITE_FAILED target=%s retained_offset=%s\n' "$flat_target" "$flat_offset" >&2
+        fi
         rm -f "$flat_temp"
     fi
     if [ -n "$flat_cursor_path" ] && [ "$flat_offset" != "$flat_initial_offset" ]; then
@@ -157,23 +184,135 @@ flat_capture_delta() {
     echo "$flat_offset"
 }
 flat_probe() {
+    [ ! -f "${FLAT_PREFIX}_probe.stop" ] || return 0
     flat_name=$1; shift
     flat_raw="${FLAT_PREFIX}_${flat_name}.raw"
     flat_out="${FLAT_PREFIX}_${flat_name}.out"
+    printf '%s PROBE_BEGIN command=%s timeout_seconds=%s\n' "$(date +%Y%m%d_%H%M%S)" "$*" "$PROBE_SECONDS" > "$flat_out"
+    flat_plain_append "$flat_out" "$FLAT_DEST/$flat_name.log" 2>/dev/null || true
+    rm -f "${FLAT_PREFIX}_probe.timeout"
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "MISSING_COMMAND $1" > "$flat_out"
     else
         (exec "$@") > "$flat_raw" 2>&1 &
         flat_child=$!
-        (sleep "$PROBE_SECONDS"; kill -KILL "$flat_child" 2>/dev/null || true) &
+        printf '%s\n' "$flat_child" > "${FLAT_PREFIX}_probe.child"
+        (sleep "$PROBE_SECONDS"; echo 1 > "${FLAT_PREFIX}_probe.timeout"; kill -KILL "$flat_child" 2>/dev/null || true) &
         flat_timer=$!
+        printf '%s\n' "$flat_timer" > "${FLAT_PREFIX}_probe.timer"
         wait "$flat_child"; flat_rc=$?
         kill "$flat_timer" 2>/dev/null || true; wait "$flat_timer" 2>/dev/null || true
+        rm -f "${FLAT_PREFIX}_probe.child" "${FLAT_PREFIX}_probe.timer"
         tail -c 1048576 "$flat_raw" > "$flat_out"
-        echo "PROBE_RESULT status=$flat_rc command=$*" >> "$flat_out"
+        flat_timed_out=0; [ ! -f "${FLAT_PREFIX}_probe.timeout" ] || flat_timed_out=1
+        printf '%s PROBE_RESULT status=%s timed_out=%s command=%s\n' "$(date +%Y%m%d_%H%M%S)" "$flat_rc" "$flat_timed_out" "$*" >> "$flat_out"
     fi
     flat_plain_append "$flat_out" "$FLAT_DEST/$flat_name.log" 2>/dev/null || true
     rm -f "$flat_raw" "$flat_out"
+}
+flat_audio_capture() (
+    # Preserve a partial line between polls so an error split across writes is
+    # still indexed. This is an index of existing stock messages, no PCM dump.
+    audio_input="${FLAT_PREFIX}_audio.input"
+    audio_partial="${FLAT_PREFIX}_audio.partial"
+    audio_output="${FLAT_PREFIX}_audio.chunk"
+    { [ ! -f "$audio_partial" ] || cat "$audio_partial"; cat "$1"; } > "$audio_input" || exit 1
+    complete=0; [ -n "$(tail -c 1 "$1")" ] || complete=1
+    : > "$audio_partial"
+    awk -v complete="$complete" -v pending="$audio_partial" '
+      function emit(line) {
+        if (line ~ /AudioStream|CQNXSoundIF|RTP_AUDIO|ann3_dio_ann|io-audio|audio_service|<AUDIO>|AUDIO_FINALIZE|Modes changed|audioThreadPriority|audioLatency|[Uu]nderrun|[Oo]verrun|HB: T=|HB:.*(dio_manager|smartphone_integrator|io-audio|audio_service|mirror-display|maneuver_render|j9)/)
+          print line
+      }
+      NR > 1 { emit(previous) }
+      { previous=$0 }
+      END {
+        if (complete) emit(previous)
+        else if (length(previous) <= 8192) printf "%s", previous > pending
+        else print "AUDIO_INDEX_PARTIAL_LINE_DROPPED bytes=" length(previous) " full_system_log_preserved=1"
+      }
+    ' "$audio_input" > "$audio_output" || exit 1
+    if [ -s "$audio_output" ]; then
+        flat_plain_append "$audio_output" "$FLAT_DEST/streams/audio.log" ||
+            printf 'AUDIO_INDEX_WRITE_FAILED full_system_log_preserved=1\n' >&2
+    fi
+    rm -f "$audio_input" "$audio_output"
+)
+flat_pid_alive() {
+    case "$1" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null
+}
+flat_start_slog() {
+    flat_follow_generation=$((flat_follow_generation + 1))
+    # Called only after the previous writer is gone and its final bytes copied.
+    # A replay is a new source boundary, not the continuation of an incomplete
+    # line left by the old follower. Preserve that line with an explicit marker.
+    if [ -s "${FLAT_PREFIX}_audio.partial" ]; then
+        printf '\n' > "${FLAT_PREFIX}_audio.boundary"
+        flat_audio_capture "${FLAT_PREFIX}_audio.boundary"
+        rm -f "${FLAT_PREFIX}_audio.boundary"
+        flat_log_event "AUDIO_INDEX_SOURCE_BOUNDARY incomplete_line_terminated=1"
+    fi
+    : > "$flat_system"
+    flat_system_offset=0
+    (exec sloginfo -w -t) >> "$flat_system" 2>&1 & flat_slog_pid=$!
+    flat_follow_stop=0
+    flat_log_event "SYSTEM_FOLLOW_START pid=$flat_slog_pid generation=$flat_follow_generation replay_possible=1 command=sloginfo_-w_-t"
+}
+flat_follow_poll() {
+    if ! flat_pid_alive "$flat_slog_pid"; then
+        [ -z "$flat_slog_pid" ] || wait "$flat_slog_pid" 2>/dev/null || true
+        if command -v sloginfo >/dev/null 2>&1; then
+            # The writer may exit after the loop's first copy. Drain again now
+            # that it is gone; never discard its last bytes or an SD write retry.
+            flat_system_offset=$(flat_capture_delta "$flat_system" "$flat_system_offset" "$FLAT_DEST/streams/system.log" "${FLAT_PREFIX}_system.chunk")
+            if [ -f "$flat_system" ] && [ "$(wc -c < "$flat_system")" -gt "$flat_system_offset" ]; then
+                flat_log_event "SYSTEM_FOLLOW_DRAIN_PENDING captured_bytes=$flat_system_offset restart=DEFERRED"
+                return 0
+            fi
+            flat_log_event "SYSTEM_FOLLOW_RESTART previous_pid=${flat_slog_pid:-NONE} reason=exit_or_rotation captured_bytes=$flat_system_offset"
+            flat_start_slog
+        elif [ $((flat_tick % META_EVERY)) = 0 ]; then
+            flat_log_event "SYSTEM_FOLLOW_UNAVAILABLE command=sloginfo"
+        fi
+    elif [ "$flat_follow_stop" = 0 ] && [ -f "$flat_system" ] && [ "$(wc -c < "$flat_system")" -ge "$RAW_LIMIT" ]; then
+        # Never truncate an open writer. Its final tail is copied on the next
+        # poll before restarting. sloginfo replays its ring; record that boundary.
+        flat_log_event "SYSTEM_FOLLOW_ROTATE_REQUEST generation=$flat_follow_generation limit_bytes=$RAW_LIMIT"
+        flat_follow_stop=1
+        kill -KILL "$flat_slog_pid" 2>/dev/null || true
+    fi
+}
+flat_audio_probes() {
+    # These read-only snapshots run separately from both stream persistence and
+    # mount/library probes. Stock scheduling/CPU counters require no new hooks.
+    flat_probe audio_dio_sched.txt pidin -p dio_manager sched
+    flat_probe audio_dio_ttimes.txt pidin -p dio_manager ttimes
+    flat_probe audio_integrator_sched.txt pidin -p smartphone_integrator sched
+    flat_probe audio_integrator_ttimes.txt pidin -p smartphone_integrator ttimes
+    flat_probe audio_driver_sched.txt pidin -p io-audio sched
+    flat_probe audio_driver_ttimes.txt pidin -p io-audio ttimes
+    flat_probe audio_service_sched.txt pidin -p audio_service sched
+    flat_probe audio_service_ttimes.txt pidin -p audio_service ttimes
+    flat_probe audio_mirror_ttimes.txt pidin -p carplay-alt111-mirror-display ttimes
+    flat_probe audio_rgi_ttimes.txt pidin -p maneuver_render ttimes
+    flat_probe audio_java_ttimes.txt pidin -p j9 ttimes
+}
+flat_stop_worker() {
+    # Kill only the exact children published by our own worker. No slay/global
+    # process-name cleanup, and no unbounded wait on a blocked QNX resource.
+    worker_prefix=$1; worker_pid=$2
+    : > "${worker_prefix}_probe.stop"
+    if flat_pid_alive "$worker_pid"; then kill -KILL "$worker_pid" 2>/dev/null || true; fi
+    for child_file in "$worker_prefix"_probe.child "$worker_prefix"_probe.timer; do
+        child_pid=$(cat "$child_file" 2>/dev/null || true)
+        if flat_pid_alive "$child_pid"; then kill -KILL "$child_pid" 2>/dev/null || true; fi
+    done
+}
+flat_cleanup_children() {
+    flat_stop_worker "${FLAT_PREFIX}_metadata" "${flat_metadata_pid:-}"
+    flat_stop_worker "${FLAT_PREFIX}_audio-probe" "${flat_audio_pid:-}"
+    if flat_pid_alive "${flat_slog_pid:-}"; then kill -KILL "$flat_slog_pid" 2>/dev/null || true; fi
 }
 flat_log_event() {
     flat_event="${FLAT_PREFIX}_event"
@@ -214,12 +353,12 @@ run_flat_plaintext() {
             fi
         done
     fi
-    flat_log_event "BOOT_BEGIN storage=FLAT_TMP_PLAINTEXT_SD volume=$VOLUME cursor_scope=VOLATILE_BOOT_POSIX cursor_resume=1 cursor_dir=$cursor_dir"
+    flat_log_event "BOOT_BEGIN storage=FLAT_TMP_PLAINTEXT_SD volume=$VOLUME cursor_scope=VOLATILE_BOOT_POSIX cursor_resume=1 cursor_dir=$cursor_dir audio_diagnostics=V1 probes=INDEPENDENT_ASYNC log_segment_bytes=$LOG_LIMIT retained_segments=4"
     flat_log_event "SD_READY volume=$VOLUME"
     flat_system="${FLAT_PREFIX}_system.raw"; flat_slog_pid=""
-    if command -v sloginfo >/dev/null 2>&1; then
-        (exec sloginfo -w -t) > "$flat_system" 2>&1 & flat_slog_pid=$!
-    fi
+    flat_follow_generation=0; flat_follow_stop=0
+    flat_audio_pid=""; flat_metadata_pid=""
+    trap 'flat_cleanup_children; exit 130' 1 2 15
     flat_hook_offset=$(flat_read_cursor "${CURSOR_PREFIX}_hook.offset")
     flat_dio_offset=$(flat_read_cursor "${CURSOR_PREFIX}_dio.offset")
     flat_entry_offset=$(flat_read_cursor "${CURSOR_PREFIX}_boot-entry.offset")
@@ -237,6 +376,10 @@ run_flat_plaintext() {
     flat_system_offset=0
     flat_tick=0
     while [ -f "$ENABLED" ]; do
+        # Persist the continuous system stream before any optional work. This
+        # also copies the final tail of a dead follower before its restart.
+        flat_system_offset=$(flat_capture_delta "$flat_system" "$flat_system_offset" "$FLAT_DEST/streams/system.log" "${FLAT_PREFIX}_system.chunk")
+        flat_follow_poll
         flat_hook_offset=$(flat_capture_delta "$(select_hook_source)" "$flat_hook_offset" "$FLAT_DEST/streams/hook_tmp.log" "${FLAT_PREFIX}_hook.chunk" "${CURSOR_PREFIX}_hook.offset")
         flat_dio_offset=$(flat_capture_delta "$ROOT/tmp/CinemoDioManager.log" "$flat_dio_offset" "$FLAT_DEST/streams/dio_tmp.log" "${FLAT_PREFIX}_dio.chunk" "${CURSOR_PREFIX}_dio.offset")
         flat_entry_offset=$(flat_capture_delta "$(select_boot_entry_source)" "$flat_entry_offset" "$FLAT_DEST/streams/boot_entry.log" "${FLAT_PREFIX}_entry.chunk" "${CURSOR_PREFIX}_boot-entry.offset")
@@ -273,13 +416,23 @@ run_flat_plaintext() {
             cp "$ROOT/tmp/mmi-altscreen-displayable3.state" "$FLAT_DEST/streams/mmi-altscreen-displayable3.state.new" 2>/dev/null &&
                 mv "$FLAT_DEST/streams/mmi-altscreen-displayable3.state.new" "$FLAT_DEST/streams/mmi-altscreen-displayable3.state" 2>/dev/null || true
         fi
-        flat_system_offset=$(flat_capture_delta "$flat_system" "$flat_system_offset" "$FLAT_DEST/streams/system.log" "${FLAT_PREFIX}_system.chunk")
-        if [ -f "$flat_system" ] && [ "$(wc -c < "$flat_system")" -ge 8388608 ]; then
-            flat_log_event "SYSTEM_RAW_TRIM possible_boundary_loss=1 limit_bytes=8388608"
-            : > "$flat_system"
-            flat_system_offset=0
+        if [ $((flat_tick % AUDIO_EVERY)) = 0 ]; then
+            if flat_pid_alive "$flat_audio_pid"; then
+                flat_log_event "AUDIO_PROBE_BUSY pid=$flat_audio_pid stream_recording=CONTINUES"
+            else
+                [ -z "$flat_audio_pid" ] || wait "$flat_audio_pid" 2>/dev/null || true
+                ( FLAT_PREFIX="${FLAT_PREFIX}_audio-probe"; flat_audio_probes ) &
+                flat_audio_pid=$!
+            fi
         fi
-        if [ "$flat_tick" = 0 ] || [ $((flat_tick % 15)) = 0 ]; then
+        if [ $((flat_tick % META_EVERY)) = 0 ]; then
+            flat_log_event "RECORDER_HEARTBEAT tick=$flat_tick system_bytes=$flat_system_offset follower_pid=${flat_slog_pid:-NONE} follow_generation=$flat_follow_generation audio_probe_pid=${flat_audio_pid:-NONE}"
+            if flat_pid_alive "$flat_metadata_pid"; then
+                flat_log_event "METADATA_PROBE_BUSY pid=$flat_metadata_pid stream_recording=CONTINUES"
+            else
+              [ -z "$flat_metadata_pid" ] || wait "$flat_metadata_pid" 2>/dev/null || true
+              (
+                FLAT_PREFIX="${FLAT_PREFIX}_metadata"
             flat_probe processes.txt pidin arguments
             flat_probe dio_libraries.txt pidin -p dio_manager libs
             flat_probe dio_mappings.txt pidin -p dio_manager mapinfo
@@ -325,14 +478,33 @@ run_flat_plaintext() {
             } > "$flat_state" 2>&1
             flat_plain_append "$flat_state" "$FLAT_DEST/file_state.txt.log" 2>/dev/null || true
             rm -f "$flat_state"
+              ) &
+              flat_metadata_pid=$!
+            fi
         fi
         flat_tick=$((flat_tick + 1))
         if [ "$ITERATIONS" -gt 0 ] && [ "$flat_tick" -ge "$ITERATIONS" ]; then break; fi
         sleep "$INTERVAL"
     done
-    if [ -n "$flat_slog_pid" ]; then kill -KILL "$flat_slog_pid" 2>/dev/null || true; wait "$flat_slog_pid" 2>/dev/null || true; fi
+    # Give fast snapshots a bounded opportunity to finish. Stream collection
+    # never waits for them during normal operation.
+    flat_drain=0; flat_drain_interval=1; flat_drain_limit=2
+    if [ "${ALTSCREEN_CHAIN_TESTING:-0}" = 1 ]; then flat_drain_interval=0.1; flat_drain_limit=10; fi
+    while { flat_pid_alive "$flat_metadata_pid" || flat_pid_alive "$flat_audio_pid"; } && [ "$flat_drain" -lt "$flat_drain_limit" ]; do
+        sleep "$flat_drain_interval"; flat_drain=$((flat_drain + 1))
+    done
+    flat_cleanup_children
+    flat_drain=0
+    while flat_pid_alive "$flat_slog_pid" && [ "$flat_drain" -lt "$flat_drain_limit" ]; do
+        sleep "$flat_drain_interval"; flat_drain=$((flat_drain + 1))
+    done
+    flat_system_offset=$(flat_capture_delta "$flat_system" "$flat_system_offset" "$FLAT_DEST/streams/system.log" "${FLAT_PREFIX}_system.chunk")
     flat_log_event "DIAGNOSTICS_STOP"
-    rm -f "${FLAT_PREFIX}"_* 2>/dev/null || true
+    # Do not unlink scratch still referenced by a stuck resource-manager call.
+    if ! flat_pid_alive "$flat_slog_pid" && ! flat_pid_alive "$flat_metadata_pid" && ! flat_pid_alive "$flat_audio_pid"; then
+        rm -f "${FLAT_PREFIX}"_* 2>/dev/null || true
+    fi
+    trap - 1 2 15
     return 0
 }
 

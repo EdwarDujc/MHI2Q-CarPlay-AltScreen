@@ -29,6 +29,7 @@ public final class ClusterStateController {
     public static final int CTX_STOCK = 74;
     public static final int CTX_BOUNCE = 72;
     public static final int CTX_COMPOSITE = 80;
+    private static final int CTX_RGI_REFRESH = 81;
 
     /* Compatibility seams used by newer geometry-aware unified JARs. */
     public static final int VIEWAREA_FULLSCREEN = 0;
@@ -100,6 +101,7 @@ public final class ClusterStateController {
     private static volatile Thread contextWriterThread;
     private static volatile boolean ownershipIntent;
     private static volatile boolean compositeApplied;
+    private static boolean releasePending;
     private static volatile boolean carPlaySessionActive;
     private static volatile boolean rgiPresentationActive;
     private static volatile int rgiWindowRevision;
@@ -171,8 +173,8 @@ public final class ClusterStateController {
     }
 
     /* Called only after READY + FRAME_READY. A new window needs a real
-     * context transition even if the map already owns 80. The worker remains
-     * the sole terminal-1 context writer; RGI never invokes dmdt. */
+     * context transition even if the map already owns 80. Refresh through a
+     * map-preserving context, never the OEM map. Java remains the sole writer. */
     public static String activateRgiRenderer() {
         final int revision;
         synchronized (LOCK) {
@@ -552,19 +554,37 @@ public final class ClusterStateController {
         boolean wantComposite = (baseActive && baseReady) || rgiPresentationActive;
 
         if (!wantComposite) {
-            if (ownershipIntent || compositeApplied) {
+            if (ownershipIntent || compositeApplied || releasePending) {
                 ownershipIntent = false;
-                Object dm = displayManager();
-                boolean ok = dm != null && selectContext(dm, CTX_STOCK, "release");
                 compositeApplied = false;
-                contextWriteFailures = 0;
-                if (ok) {
-                    if (!verifyContext(dm, CTX_STOCK, "release")) {
-                        diag("CTX74_VERIFY_WARN desired=74");
-                    }
-                    geometryReapply("ctx74-release");
-                    diag("ownership released -> ctx74");
+                releasePending = true;
+                if (nowMs() < circuitOpenUntilMs) return;
+                Object dm = displayManager();
+                if (dm == null) {
+                    contextFailure("release DisplayManager unavailable");
+                    return;
                 }
+                int actual = currentContext(dm);
+                if (hasCompositeDemand()) return;
+                /* An OEM owner may have taken over while a failed release was
+                 * waiting. Do not overwrite its current camera/menu/map view. */
+                if (actual >= 0 && actual != CTX_COMPOSITE
+                    && actual != CTX_RGI_REFRESH && actual != CTX_BOUNCE) {
+                    releasePending = false;
+                    contextWriteFailures = 0;
+                    geometryReapply("OEM-context-retained");
+                    diag("ownership released; OEM context retained actual=" + actual);
+                    return;
+                }
+                if (!selectContext(dm, CTX_STOCK, "release")
+                    || !verifyContext(dm, CTX_STOCK, "release")) {
+                    contextFailure("ctx74 release not verified; retry pending");
+                    return;
+                }
+                releasePending = false;
+                contextWriteFailures = 0;
+                geometryReapply("ctx74-release");
+                diag("ownership released -> ctx74 verified=1");
             }
             return;
         }
@@ -578,25 +598,47 @@ public final class ClusterStateController {
             contextFailure("DisplayManager unavailable");
             return;
         }
+        if (!stillWantComposite()) return;
 
         int rgiRevision = rgiWindowRevision;
         boolean rebindRgi = rgiPresentationActive
             && rgiConfirmedRevision != rgiRevision;
         if (!compositeApplied || rebindRgi) {
             int actual = currentContext(dm);
+            if (!stillWantComposite()) return;
             diag("ownership acquire requested; base=" + (baseActive ? "1" : "0")
                 + "/" + (baseReady ? "1" : "0")
                 + " rgi=" + (rgiPresentationActive ? "1" : "0")
                 + " actual=" + actual);
 
             String verifyReason = "already-active";
-            if (actual != CTX_COMPOSITE || rebindRgi) {
-                if (!selectContext(dm, CTX_BOUNCE, "enter-bounce")) {
+            if (actual == CTX_COMPOSITE && rebindRgi) {
+                if (!hasRgiRefreshContext(dm)) {
+                    contextFailure("map-preserving RGI refresh context unavailable");
+                    return;
+                }
+                if (!selectContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh")
+                    || !verifyContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh")) {
+                    contextFailure("RGI refresh readback failed");
+                    return;
+                }
+                /* A ready RGI window now gets a fresh composition binding.
+                 * No 180ms OEM-map dwell; displayable3 stays in both contexts. */
+                if (!stillWantComposite()) return;
+                if (!selectContext(dm, CTX_COMPOSITE, "rgi-composite")) {
+                    contextFailure("RGI composite enter failed");
+                    return;
+                }
+                verifyReason = "rgi-composite";
+            } else if (actual != CTX_COMPOSITE) {
+                boolean refreshActual = actual == CTX_RGI_REFRESH && hasRgiRefreshContext(dm);
+                if (!refreshActual &&
+                    !selectContext(dm, CTX_BOUNCE, "enter-bounce")) {
                     contextFailure("ctx72 bounce failed");
                     return;
                 }
-                sleep(BOUNCE_MS);
-                if (!ownershipIntent) return;
+                if (!refreshActual) sleep(BOUNCE_MS);
+                if (!stillWantComposite()) return;
                 if (!selectContext(dm, CTX_COMPOSITE, "enter-composite")) {
                     contextFailure("ctx80 enter failed");
                     return;
@@ -609,7 +651,10 @@ public final class ClusterStateController {
                 return;
             }
 
+            if (!stillWantComposite()) return;
+
             compositeApplied = true;
+            releasePending = false;
             contextWriteFailures = 0;
             lastReconcileMs = nowMs();
             geometryReapply("ctx80-acquired");
@@ -624,6 +669,7 @@ public final class ClusterStateController {
         lastReconcileMs = now;
 
         int actual = currentContext(dm);
+        if (!stillWantComposite()) return;
         if (actual >= 0 && actual != CTX_COMPOSITE) {
             diag("physical context drift actual=" + actual
                 + " desired=80 -> Java reconcile");
@@ -635,9 +681,25 @@ public final class ClusterStateController {
                 contextFailure("ctx80 reconcile readback failed");
                 return;
             }
+            if (!stillWantComposite()) return;
             contextWriteFailures = 0;
             geometryReapply("ctx80-reconcile");
         }
+    }
+
+    /* Recheck after a blocking switch/readback. The route or base-video owner
+     * can withdraw demand while this sole writer is inside the OEM call. */
+    private static boolean stillWantComposite() {
+        if (ownershipIntent && hasCompositeDemand()) return true;
+        ownershipIntent = false;
+        compositeApplied = false;
+        releasePending = true;
+        return false;
+    }
+
+    private static boolean hasCompositeDemand() {
+        return rgiPresentationActive || (new File(BASEVIDEO_ACTIVE_FILE).exists()
+            && new File(BASEVIDEO_READY_FILE).exists());
     }
 
     private static Object displayManager() {
@@ -651,6 +713,56 @@ public final class ClusterStateController {
             diag("DisplayManager lookup failed: " + describe(t));
             return null;
         }
+    }
+
+    /* Called at the end of the patched DM's defineContexts(), BEFORE the OEM
+     * declares the table to DSI. Never redeclare contexts during navigation.
+     * Slot81 is unused in our A5 table; G24 has OEM contexts there, so do not
+     * overwrite it or silently apply the A5 composition to another platform. */
+    public static void configureRgiRefreshContext(Object dm) {
+        try {
+            Object[] contexts = displayContexts(dm);
+            if (contexts == null || contexts.length <= CTX_RGI_REFRESH
+                || contexts[CTX_RGI_REFRESH] != null
+                || !contextHasLayers(contexts[CTX_COMPOSITE],
+                                     new int[]{98, 101, 102, 3})) return;
+            Class cls = contexts[CTX_COMPOSITE].getClass();
+            contexts[CTX_RGI_REFRESH] = cls.getConstructor(
+                new Class[]{Integer.TYPE, (new int[0]).getClass()}).newInstance(
+                new Object[]{new Integer(CTX_RGI_REFRESH), new int[]{101, 102, 3}});
+        } catch (Throwable t) {
+            diag("RGI refresh context configuration failed: " + describe(t));
+        }
+    }
+
+    private static Object[] displayContexts(Object dm) throws Exception {
+        Class cls = dm.getClass();
+        while (cls != null) {
+            try {
+                Field field = cls.getDeclaredField("dc");
+                field.setAccessible(true);
+                return (Object[])field.get(dm);
+            } catch (NoSuchFieldException absent) { cls = cls.getSuperclass(); }
+        }
+        return null;
+    }
+
+    private static boolean contextHasLayers(Object context, int[] expected) throws Exception {
+        if (context == null) return false;
+        int[] layers = (int[])context.getClass().getField("displayableList").get(context);
+        if (layers == null || layers.length != expected.length) return false;
+        int i;
+        for (i = 0; i < layers.length; ++i) if (layers[i] != expected[i]) return false;
+        return true;
+    }
+
+    private static boolean hasRgiRefreshContext(Object dm) {
+        try {
+            Object[] contexts = displayContexts(dm);
+            return contexts != null && contexts.length > CTX_RGI_REFRESH
+                && contextHasLayers(contexts[CTX_COMPOSITE], new int[]{98, 101, 102, 3})
+                && contextHasLayers(contexts[CTX_RGI_REFRESH], new int[]{101, 102, 3});
+        } catch (Throwable t) { return false; }
     }
 
     private static int currentContext(Object dm) {
@@ -734,12 +846,13 @@ public final class ClusterStateController {
         diag("context failure " + contextWriteFailures + "/"
             + CONTEXT_FAILURE_LIMIT + ": " + reason);
         if (contextWriteFailures < CONTEXT_FAILURE_LIMIT) return;
+        releasePending = true;
         ownershipIntent = false;
         compositeApplied = false;
         circuitOpenUntilMs = nowMs() + CIRCUIT_BREAKER_MS;
         contextWriteFailures = 0;
         diag("context circuit breaker OPEN for " + CIRCUIT_BREAKER_MS
-            + " ms; ownership released");
+            + " ms; ownership intent cleared; physical release pending");
     }
 
 
