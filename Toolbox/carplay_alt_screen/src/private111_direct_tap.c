@@ -45,6 +45,7 @@ static p111_h264_shm_t *g_h264;
 static p111_frame_shm_t *g_frame;
 static volatile unsigned g_tap_lock;
 static void *g_stream;
+static void *g_allowed_stream; /* explicit attach/end, never set by a frame */
 static uint32_t g_generation;
 static uint32_t g_stale_callback_count;
 static uint32_t g_attach_logged_generation;
@@ -633,7 +634,7 @@ static void reset_frame_for_generation_locked(int force) {
 static int begin_stream_locked(void *stream) {
     int new_session = 0;
 
-    if (!stream) return 0;
+    if (!stream || stream != g_allowed_stream) return 0;
 
     /*
      * Session ownership is monotonic until explicit teardown. A late callback
@@ -695,6 +696,16 @@ static int begin_stream_locked(void *stream) {
                       (unsigned)getpid());
     }
     return 1;
+}
+
+int p111_direct_tap_stream_begin(void *stream) {
+    int allowed;
+    if (!stream) return 0;
+    tap_lock();
+    allowed = !g_stream || g_stream == stream;
+    if (allowed) g_allowed_stream = stream;
+    tap_unlock();
+    return allowed;
 }
 
 static uint32_t scan_annexb_flags(const uint8_t *d, size_t n,
@@ -1474,7 +1485,7 @@ int p111_frame_tap_write_window(void *stream, void *screen_window,
     if (!env_truth("ALT111_DIRECT_FRAME_TAP", 1)) return 1;
 
     tap_lock();
-    if (g_stream && g_stream != stream) {
+    if (stream != g_allowed_stream || (g_stream && g_stream != stream)) {
         ++g_stale_callback_count;
         if (g_stale_callback_count == 1u ||
             (g_stale_callback_count & 255u) == 0u) {
@@ -1488,6 +1499,12 @@ int p111_frame_tap_write_window(void *stream, void *screen_window,
     tap_unlock();
 
     linearizer_lock();
+    /* Teardown or replacement may have won while this callback waited. Never
+     * create a pixmap/readback for a retired stream after that boundary. */
+    tap_lock();
+    rc = stream == g_allowed_stream && (!g_stream || g_stream == stream);
+    tap_unlock();
+    if (!rc) { linearizer_unlock(); return 1; }
     ++g_linearizer.requests;
 
     /*
@@ -1833,7 +1850,7 @@ void p111_direct_tap_stream_end(void *stream) {
     uint32_t ended_generation = 0;
 
     tap_lock();
-    if (!stream || g_stream == stream) {
+    if (!stream || g_stream == stream || g_allowed_stream == stream) {
         ended_current = 1;
         ended_generation = g_generation;
         if (g_h264) {
@@ -1851,6 +1868,7 @@ void p111_direct_tap_stream_end(void *stream) {
         stream_ready_clear_locked();
         g_last_frame_publish_us32 = 0u;
         g_stream = NULL;
+        g_allowed_stream = NULL;
     } else {
         altscreen_log("PHASE=DIRECT111_TAP_STOP_STALE stream=%p current_stream=%p generation=%u action=IGNORE_LINEARIZER_TEARDOWN",
                       stream, g_stream, g_generation);

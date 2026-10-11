@@ -24,6 +24,8 @@ public final class NativeRouteStateOverlay {
 
     public static void apply(DSIResponseContainer container, boolean active) {
         if (container == null) return;
+        State previous = current;
+        if (active && previous != null && previous.container != container) releaseCurrent();
         synchronized (container) {
             State state = current;
             if (active) {
@@ -42,6 +44,18 @@ public final class NativeRouteStateOverlay {
                 current = null;
                 container.setRgActive(state.latest);
             }
+        }
+    }
+
+    /** Release by our retained container, even if an old ClusterService can
+     * no longer return it. A failed OEM restore must not poison future overlays. */
+    public static void releaseCurrent() {
+        State state = current;
+        if (state == null) return;
+        synchronized (state.container) {
+            if (current != state) return;
+            current = null;
+            state.container.setRgActive(state.latest);
         }
     }
 }

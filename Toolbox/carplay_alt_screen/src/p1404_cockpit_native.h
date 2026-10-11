@@ -52,6 +52,8 @@ int  p1404_cockpit_native_complete_start(void *receiver, void **stream);
  * MainScreen's displayable 59. */
 int  p1404_cockpit_native_attach(void *receiver, void *stream);
 void p1404_cockpit_native_detach(void *receiver, void *stream);
+/* Submit stopUI on the outer lifecycle owner before it joins the worker. */
+int p1404_cockpit_native_stop_ui(void *receiver, void *stream);
 /* Set true immediately before ProcessFrames; clear before StopSession.
  * Clearing cancels future submissions without waiting on an OEM command. */
 void p1404_cockpit_native_processing(void *receiver, void *stream, int live);

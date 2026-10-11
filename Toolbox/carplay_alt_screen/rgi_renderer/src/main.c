@@ -13,6 +13,7 @@
 
 #include "log_stamp.h"
 #include "supervisor_lease.h"
+#include "supervisor_clock.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -441,6 +442,8 @@ static void save_screenshot(int fb_w, int fb_h, const char *label) {
 
 int main(int argc, char **argv) {
     int port=CR_TCP_PORT, arg;
+    if (argc == 2 && !strcmp(argv[1], "--monotonic-seconds"))
+        return rgi_supervisor_monotonic_seconds();
     if (argc == 3 && !strcmp(argv[1], "--supervisor"))
         return rgi_supervisor_exec(argv[2]);
     if (rgi_supervisor_inherit() != 0) return 2;

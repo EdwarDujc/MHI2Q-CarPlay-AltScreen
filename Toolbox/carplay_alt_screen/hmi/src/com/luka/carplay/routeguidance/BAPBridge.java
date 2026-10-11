@@ -155,6 +155,7 @@ public class BAPBridge {
 
     private ClusterService csRef;
     private KOMOService komoService;
+    private long lastClusterAccessWarning;
     private RendererServer rendererClient;
     private volatile PresentationListener presentationListener;
 
@@ -531,26 +532,32 @@ public class BAPBridge {
         try {
             Navigation navi = Navigation.getInstance();
             if (navi == null) {
-                Log.w(TAG, "ClusterAccess: Navigation.getInstance() returned null");
+                clusterAccessWarning("ClusterAccess: Navigation.getInstance() returned null");
                 return;
             }
             ClusterService cs = navi.getClusterService();
             if (cs == null) {
-                Log.w(TAG, "ClusterAccess: ClusterService is null");
+                clusterAccessWarning("ClusterAccess: ClusterService is null");
                 return;
             }
-            if (cs == this.csRef) return;
-            if (this.csRef != null) {
-                lowerBarKomo.clear(this.csRef);
-                forceClusterRouteInfoState(false);
-                forceGfxAvailable(false);
+            KOMOService nextKomo = cs.getKomoService();
+            if (cs == this.csRef && nextKomo == this.komoService) return;
+            if (this.csRef != null && cs != this.csRef) {
+                try { lowerBarKomo.clear(this.csRef); }
+                catch (Throwable t) { clusterAccessWarning("old KOMO clear failed: " + t); }
+                try { forceClusterRouteInfoState(false); }
+                finally {
+                    try { NativeRouteStateOverlay.releaseCurrent(); }
+                    catch (Throwable t) { clusterAccessWarning("old native state restore failed: " + t); }
+                }
             }
+            if (this.csRef != null) forceGfxAvailable(false);
             this.csRef = cs;
-            this.komoService = cs.getKomoService();
+            this.komoService = nextKomo;
             if (this.komoService != null) {
                 Log.i(TAG, "KOMO service acquired");
             } else {
-                Log.w(TAG, "KOMO service is null (non-fatal, LVDS video won't work)");
+                clusterAccessWarning("KOMO service is null; lazy reacquire remains enabled");
             }
 
             Log.i(TAG, "ClusterAccess init OK");
@@ -559,7 +566,16 @@ public class BAPBridge {
                 forceGfxAvailable(customRendererStarted);
             }
         } catch (Throwable e) {
-            Log.w(TAG, "ClusterAccess setup failed (non-fatal): " + e.getMessage());
+            clusterAccessWarning("ClusterAccess setup failed: " + e.getMessage());
+        }
+    }
+
+    private void clusterAccessWarning(String message) {
+        long now = System.currentTimeMillis();
+        if (lastClusterAccessWarning == 0 || now < lastClusterAccessWarning
+                || now - lastClusterAccessWarning >= 10000L) {
+            lastClusterAccessWarning = now;
+            Log.w(TAG, message);
         }
     }
 

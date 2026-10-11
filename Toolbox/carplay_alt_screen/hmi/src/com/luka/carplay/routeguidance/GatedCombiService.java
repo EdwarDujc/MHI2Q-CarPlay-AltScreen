@@ -65,6 +65,10 @@ public class GatedCombiService implements CombiBAPServiceNavi {
     /* Bounded OEM snapshot; mutations and replay run on NavigationJobs. */
     private final Object[][] latest = new Object[12][];
     private final boolean[] replayPending = new boolean[12];
+    public synchronized boolean hasPendingReplay() {
+        for (int i=0; i<replayPending.length; i++) if (replayPending[i]) return true;
+        return false;
+    }
     public synchronized void updateRGStatus(int a) {
         latest[0] = new Object[]{new Integer(a)};
         if (!blockRouteGuidance) { real.updateRGStatus(a); replayPending[0] = false; }

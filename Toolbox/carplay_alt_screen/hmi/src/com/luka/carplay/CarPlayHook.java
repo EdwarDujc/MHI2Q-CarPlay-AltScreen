@@ -41,7 +41,9 @@ public class CarPlayHook {
 
     private static volatile IFrameworkAccess frameworkAccess = null;
 
-    private static Object savedContext = null;
+    private static volatile Object savedContext = null;
+    private static final Object RGI_LOCK = new Object();
+    private static volatile boolean carplayPresent;
     private static DeviceStateHandler listenerProxy = null;
 
     /* Modules (cover art handled by TerminalModeBapCombi$EventListener) */
@@ -52,7 +54,9 @@ public class CarPlayHook {
     private static IServiceManager naviServiceManager;
     private static ServiceReference naviServiceReference;
     private static Object boundNaviService;
+    private static Object naviServiceIdentity;
     private static long lastServiceProbe;
+    private static long lastInitFailureLog;
 
     /* ============================================================
      * Entry Points (called from hook)
@@ -61,7 +65,11 @@ public class CarPlayHook {
     /**
      * Called when CarPlay device activates.
      */
-    public static synchronized void onActivate(Object context) {
+    public static void onActivate(Object context) {
+        synchronized (RGI_LOCK) { activateNow(context); }
+    }
+
+    private static void activateNow(Object context) {
         if (active && savedContext != context) onDeactivate();
         ++activationGeneration;
         Log.i(TAG, "onActivate");
@@ -80,6 +88,7 @@ public class CarPlayHook {
         if (!isRgiDisabled()) CarplayBus.getInstance().start();
 
         active = true;
+        carplayPresent = true;
         savedContext = context;
         frameworkAccess = extractFramework(context);
         ClusterStateController.start(frameworkAccess);
@@ -104,11 +113,16 @@ public class CarPlayHook {
     /**
      * Called when CarPlay device deactivates.
      */
-    public static synchronized void onDeactivate() {
+    public static void onDeactivate() {
+        synchronized (RGI_LOCK) { deactivateNow(); }
+    }
+
+    private static void deactivateNow() {
         Log.i(TAG, "onDeactivate");
         active = false;
         ++activationGeneration;
         carplayRunning = false;
+        carplayPresent = false;
         ClusterStateController.setCarPlaySessionActive(false);
         ClusterStateController.setRgiPresentationActive(false);
 
@@ -168,9 +182,13 @@ public class CarPlayHook {
      * Initialization
      * ============================================================ */
 
-    private static synchronized boolean tryInit(Object context) {
+    private static boolean tryInit(Object context) {
+        synchronized (RGI_LOCK) { return initNow(context); }
+    }
+
+    private static boolean initNow(Object context) {
         if (!active || savedContext != context) return false;
-        Object naviService = getNaviService(context);
+        Object naviService = isRgiDisabled() ? null : getNaviService(context);
         IDeviceManager deviceManager = getDeviceManager(context);
 
         if (deviceManager == null || (!isRgiDisabled() && naviService == null)) {
@@ -186,7 +204,13 @@ public class CarPlayHook {
         if (routeGuidance != null) return true;
         routeGuidance = isRgiDisabled() ? null : new RouteGuidance();
         if (routeGuidance != null && !routeGuidance.init(naviService)) {
-            Log.e(TAG, "RouteGuidance init failed");
+            long now = System.currentTimeMillis();
+            if (lastInitFailureLog == 0 || now < lastInitFailureLog || now - lastInitFailureLog >= 10000L) {
+                lastInitFailureLog = now;
+                Log.e(TAG, "RouteGuidance init failed; retry pending");
+            }
+            try { routeGuidance.stop(); }
+            catch (Throwable t) { Log.e(TAG, "failed RGI init cleanup", t); }
             routeGuidance = null;
             return false;
         }
@@ -196,7 +220,7 @@ public class CarPlayHook {
         return true;
     }
 
-    private static synchronized void startRetryThread(final Object context) {
+    private static void startRetryThread(final Object context) {
         if (retrying) return;
         retrying = true;
         final int generation = activationGeneration;
@@ -224,7 +248,7 @@ public class CarPlayHook {
                         }
                     }
                 } finally {
-                    synchronized (CarPlayHook.class) {
+                    synchronized (RGI_LOCK) {
                         if (retryThread == Thread.currentThread()) {
                             retrying = false;
                             retryThread = null;
@@ -247,27 +271,19 @@ public class CarPlayHook {
      */
     public static synchronized void onDeviceStateUpdate(TMDevice device) {
         try {
+            if (!active) return;
             boolean carplay = device.isCarplayDevice();
             boolean activeState = device.isActive();
             boolean selected = device.isSelected();
 
             Log.d(TAG, "Device: carplay=" + carplay + " active=" + activeState + " selected=" + selected);
 
-            boolean wasRunning = carplayRunning;
+            carplayPresent = carplay;
             carplayRunning = (carplay && activeState && selected);
             ClusterStateController.setCarPlaySessionActive(carplay);
 
-            if (carplay && activeState && selected
-                    && !isRgiDisabled()) {
-                if (routeGuidance != null && !routeGuidance.isRunning()) {
-                    routeGuidance.start();
-                }
-            } else if (!carplay) {
-                /* Actual disconnect — full teardown */
-                if (routeGuidance != null && routeGuidance.isRunning()) {
-                    routeGuidance.stop();
-                }
-            }
+            /* Publish demand only. The independent lifecycle writer performs
+             * start/stop and joins, never under the OEM callback's monitor. */
             /* active=false (reverse gear, camera view) or selected=false:
              * keep renderer + BAP alive. Bus data stops flowing naturally
              * while inactive, and resumes when active returns. */
@@ -296,22 +312,32 @@ public class CarPlayHook {
                 || new File("/tmp/mmi-rgi.disabled").exists();
     }
 
-    public static synchronized void pollRgiRuntime() {
+    public static void pollRgiRuntime() {
+        synchronized (RGI_LOCK) { pollRgiRuntimeNow(); }
+    }
+
+    private static void pollRgiRuntimeNow() {
+        com.luka.carplay.core.ScreenNavStatusGate.retryPending();
+        long now = System.currentTimeMillis();
         if (active && savedContext != null &&
-                System.currentTimeMillis() - lastServiceProbe >= 1000L) {
-            lastServiceProbe = System.currentTimeMillis();
+                (now < lastServiceProbe || now - lastServiceProbe >= 1000L)) {
+            lastServiceProbe = now;
             if (tryInit(savedContext) && carplayRunning && routeGuidance != null
                     && !isRgiDisabled() && !routeGuidance.isRunning()) routeGuidance.start();
             if (routeGuidance != null) routeGuidance.refreshServices();
         }
         RouteGuidance rg = routeGuidance;
         if (isRgiDisabled()) {
-            if (rg != null && rg.isRunning()) rg.stop();
+            retireRouteGuidance();
+            releaseNaviService();
             try { new File("/tmp/mmi-rgi.stopped").createNewFile(); }
             catch (Exception e) { Log.w(TAG, "RGI stop acknowledgement failed: " + e); }
         } else {
             new File("/tmp/mmi-rgi.stopped").delete();
-            if (rg != null && active && carplayRunning && !rg.isRunning()) rg.start();
+            if (rg != null && active) {
+                if (!carplayPresent && rg.isRunning()) rg.stop();
+                else if (carplayRunning && !rg.isRunning()) rg.start();
+            }
         }
     }
 
@@ -349,15 +375,26 @@ public class CarPlayHook {
                 releaseNaviService();
                 return null;
             }
-            if (sm == naviServiceManager && refs[0].equals(naviServiceReference))
+            Object identity = refs[0].getProperty("service.id");
+            if (boundNaviService != null &&
+                    ((identity != null && identity.equals(naviServiceIdentity))
+                    || (identity == null && sm == naviServiceManager && refs[0] == naviServiceReference)))
                 return boundNaviService;
+            Object next = sm.getService(refs[0]);
+            if (next != null && next == boundNaviService) {
+                /* Wrappers can change while the registered service remains
+                 * identical. Balance the probe acquisition, retain our old
+                 * manager/reference pair until that binding is retired. */
+                sm.releaseService(refs[0]);
+                return boundNaviService;
+            }
             retireRouteGuidance();
             releaseNaviService();
-            Object next = sm.getService(refs[0]);
             if (next == null) return null;
             naviServiceManager = sm;
             naviServiceReference = refs[0];
             boundNaviService = next;
+            naviServiceIdentity = identity;
             return next;
 
         } catch (Throwable e) {
@@ -379,6 +416,7 @@ public class CarPlayHook {
         naviServiceManager = null;
         naviServiceReference = null;
         boundNaviService = null;
+        naviServiceIdentity = null;
         if (manager != null && reference != null) {
             try { manager.releaseService(reference); }
             catch (Throwable t) { Log.w(TAG, "navigation service release failed: " + t); }

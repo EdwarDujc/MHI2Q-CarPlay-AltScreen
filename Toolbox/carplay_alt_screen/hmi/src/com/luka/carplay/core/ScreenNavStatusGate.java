@@ -22,12 +22,16 @@ public final class ScreenNavStatusGate {
     private static boolean appliedRouteBlocked;
     private static boolean desiredCurrentPositionBlocked;
     private static boolean installScheduled;
+    private static int policyRevision;
+    private static int appliedRevision = -1;
+    private static long lastRetryMs;
 
     private ScreenNavStatusGate() { }
 
     /** All reads/writes of CombiBAPListener.combiservice must happen on NavigationJobs. */
     private static void scheduleInstallLocked() {
-        if (installScheduled) return;
+        if (installScheduled || (appliedRevision == policyRevision
+                && gate != null && !gate.hasPendingReplay())) return;
         Navigation navigation = Navigation.getInstance();
         if (navigation == null || navigation.getDispatcher() == null) return;
         installScheduled = true;
@@ -70,6 +74,7 @@ public final class ScreenNavStatusGate {
             gate.setRouteGuidanceBlocked(desiredRouteBlocked);
             gate.setCurrentPositionInfoBlocked(desiredCurrentPositionBlocked);
             appliedRouteBlocked = desiredRouteBlocked;
+            appliedRevision = gate.hasPendingReplay() ? -1 : policyRevision;
         } catch (Throwable t) {
         }
     }
@@ -148,6 +153,7 @@ public final class ScreenNavStatusGate {
 
     /** Single owner of the native CombiBAP wrapper for both the cluster module and RGI. */
     public static synchronized boolean setRouteGuidanceBlocked(boolean blocked) {
+        if (desiredRouteBlocked != blocked || (!blocked && desiredCurrentPositionBlocked)) ++policyRevision;
         desiredRouteBlocked = blocked;
         if (blocked && gate != null) gate.setRouteGuidanceBlocked(true);
         if (!blocked) {
@@ -162,8 +168,18 @@ public final class ScreenNavStatusGate {
      * NavigationJobs, so changing these volatile policy bits requires no
      * service-field mutation. */
     public static synchronized void setCurrentPositionInfoBlocked(boolean blocked) {
+        if (desiredCurrentPositionBlocked != blocked) ++policyRevision;
         desiredCurrentPositionBlocked = blocked;
         if (blocked && gate != null) gate.setCurrentPositionInfoBlocked(true);
+        scheduleInstallLocked();
+    }
+
+    /** Resident monitor retries dispatcher/service absence and failed replay,
+     * including after the phone disconnects. OEM writes remain on NavigationJobs. */
+    public static synchronized void retryPending() {
+        long now = System.currentTimeMillis();
+        if (now >= lastRetryMs && now - lastRetryMs < 1000L) return;
+        lastRetryMs = now;
         scheduleInstallLocked();
     }
 
@@ -177,6 +193,7 @@ public final class ScreenNavStatusGate {
 
         if (cs != clusterService || current != gate) {
             appliedRouteBlocked = false;
+            appliedRevision = -1;
         }
         if (current == null) {
             if (cs == clusterService) {

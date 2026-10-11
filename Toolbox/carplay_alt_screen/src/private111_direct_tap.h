@@ -58,5 +58,7 @@ int p111_frame_tap_write_window(void *stream, void *screen_window,
                                 uint32_t source_usage);
 
 void p111_direct_tap_stream_end(void *stream);
+/* Only a new, validated native attachment may claim an idle producer. */
+int p111_direct_tap_stream_begin(void *stream);
 
 #endif

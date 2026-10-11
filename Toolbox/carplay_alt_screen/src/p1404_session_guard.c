@@ -5,6 +5,9 @@
 #include <unistd.h>
 
 #define ALT_SESSION_GUARD_SLOTS 32u
+#ifndef ALT_SESSION_WAIT_POLLS
+#define ALT_SESSION_WAIT_POLLS 5000u
+#endif
 
 static struct {
     void *receiver;
@@ -59,14 +62,15 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
             /* Stock SETUP error recovery legitimately calls outer TearDown on
              * its own thread. Allow that nesting, but never destroy resources
              * recursively while an outer stop is still using them. */
-            if (session_guards[slot].teardown_depth) {
+            if (session_guards[slot].teardown_depth && operation != ALT_SESSION_STOP_COMMAND) {
                 session_guards_release();
                 return operation == ALT_SESSION_TEARDOWN ?
                     ALT_SESSION_REENTRANT_STOP : ALT_SESSION_CLOSED;
             }
             // An OEM synchronous command callback may reenter outer teardown.
             // It must return to the submitter before its HTTP channel is freed.
-            if (session_guards[slot].command_depth && operation != ALT_SESSION_COMMAND) {
+            if (session_guards[slot].command_depth && operation != ALT_SESSION_COMMAND
+                && operation != ALT_SESSION_STOP_COMMAND) {
                 session_guards_release();
                 return ALT_SESSION_REFUSED;
             }
@@ -74,7 +78,7 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
             ++session_guards[slot].depth;
             if (operation == ALT_SESSION_TEARDOWN)
                 ++session_guards[slot].teardown_depth;
-            if (operation == ALT_SESSION_COMMAND)
+            if (operation == ALT_SESSION_COMMAND || operation == ALT_SESSION_STOP_COMMAND)
                 ++session_guards[slot].command_depth;
             lease->entered = 1;
             session_guards_release();
@@ -82,7 +86,14 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
         }
         // Monitor commands never queue behind lifecycle teardown/SETUP. This
         // avoids a fence -> worker join -> command admission cycle.
-        if (operation == ALT_SESSION_COMMAND) {
+        if (operation == ALT_SESSION_COMMAND || operation == ALT_SESSION_STOP_COMMAND) {
+            session_guards_release();
+            return ALT_SESSION_REFUSED;
+        }
+        /* A stalled OEM submitter must not pin another lifecycle caller
+         * forever. Refusal preserves its resources and reports unfinished;
+         * it never permits teardown to overlap a command. */
+        if (lease->waited >= ALT_SESSION_WAIT_POLLS) {
             session_guards_release();
             return ALT_SESSION_REFUSED;
         }
@@ -102,7 +113,7 @@ void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed
         if (full_completed) session_guards[slot].full_completed = 1;
         if (lease->operation == ALT_SESSION_TEARDOWN)
             --session_guards[slot].teardown_depth;
-        if (lease->operation == ALT_SESSION_COMMAND)
+        if (lease->operation == ALT_SESSION_COMMAND || lease->operation == ALT_SESSION_STOP_COMMAND)
             --session_guards[slot].command_depth;
         if (!--session_guards[slot].depth) session_guards[slot].owner = 0;
     }

@@ -114,6 +114,7 @@ struct native_slot {
     uint32_t linearizer_aux_drops;
     unsigned long owner_thread;
     int monitor_started;
+    int stop_ui_submitted;
     int action;
     int action_pending;
     int preconfig_rewritten;
@@ -2270,6 +2271,10 @@ int p1404_cockpit_native_attach(void *receiver, void *stream) {
     altscreen_log("PHASE=NATIVE_111_ATTACH_STAGE receiver=%p stream=%p video_impl=%p renderer_before_start=%p generation=%u state_generation=%u requested_geometry=%ux%u first_config_pending=1",
                   receiver, stream, video_impl, renderer, assigned_generation,
                   state_snap.generation, width, height);
+    if (!p111_direct_tap_stream_begin(stream)) {
+        p1404_cockpit_native_detach(receiver, stream);
+        return 0;
+    }
     return 1;
 }
 
@@ -2298,6 +2303,32 @@ static int queue_detach_restore(uint32_t generation) {
     return 1;
 }
 
+int p1404_cockpit_native_stop_ui(void *receiver, void *stream) {
+    struct native_slot *slot;
+    uint32_t generation = 0;
+    int rc;
+    native_lock();
+    slot = find_stream_locked(receiver, stream);
+    if (slot && slot->monitor_started && !slot->stop_ui_submitted) {
+        generation = slot->generation;
+        slot->stop_ui_submitted = 1; /* reserve, preventing worker duplicate */
+        slot->processing_live = 0;
+    }
+    native_unlock();
+    if (!generation) return 0;
+    rc = alt_send_cluster_event(receiver, stream, generation, ALT111_EVENT_STOP_UI);
+    native_lock();
+    slot = find_stream_locked(receiver, stream);
+    if (slot && slot->generation == generation) {
+        slot->stop_ui_submitted = rc == 0 ? 2 : 0;
+        if (rc == 0) slot->ui_event_state = 4; /* stop submitted */
+    }
+    native_unlock();
+    altscreen_log("PHASE=NATIVE_111_STOP_UI receiver=%p stream=%p generation=%u rc=%d before_worker_join=1",
+                  receiver, stream, generation, rc);
+    return rc;
+}
+
 void p1404_cockpit_native_detach(void *receiver, void *stream) {
     struct native_slot *slot;
     uint32_t generation = 0;
@@ -2310,7 +2341,7 @@ void p1404_cockpit_native_detach(void *receiver, void *stream) {
     if (slot) {
         generation = slot->generation;
         state_generation = slot->state_generation;
-        send_stop = slot->monitor_started;
+        send_stop = slot->monitor_started && !slot->stop_ui_submitted;
         restore = slot->visible ||
                   (slot->action_pending && slot->action == NATIVE_ROUTE_ACTIVATE);
         slot->stream = NULL;

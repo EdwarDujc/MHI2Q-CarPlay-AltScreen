@@ -57,9 +57,14 @@ trap 'exit 0' 1 2 15
 printf '%s\n' "$OWNER" > "$PIDFILE" || { log "RGI_SUPERVISOR=FAIL stage=pid_publish"; exit 2; }
 failures=0
 epoch_seconds() {
+  value=$(LD_PRELOAD= "$BIN" --monotonic-seconds 9>&- 2>/dev/null) || value=""
+  case "$value" in
+    ''|*[!0-9]*) ;;
+    *) printf 'm:%s\n' "$value"; return 0 ;;
+  esac
   value=$(date +%s 2>/dev/null) || value=""
   case "$value" in ''|*[!0-9]*) return 1 ;; esac
-  printf '%s\n' "$value"
+  printf 'd:%s\n' "$value"
 }
 log "RGI_SUPERVISOR=STARTED owner=$OWNER restart_limit=$MAX_RESTARTS"
 while [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" ]; do
@@ -74,8 +79,8 @@ while [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" 
   [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" ] || break
   ended=$(epoch_seconds) || ended=""
   elapsed=unknown
-  if [ -n "$started" ] && [ -n "$ended" ] && [ "$ended" -ge "$started" ]; then
-    elapsed=$((ended-started))
+  if [ -n "$started" ] && [ -n "$ended" ] && [ "${started%%:*}" = "${ended%%:*}" ] && [ "${ended#*:}" -ge "${started#*:}" ]; then
+    elapsed=$((${ended#*:}-${started#*:}))
     [ "$elapsed" -lt 60 ] || failures=0
   fi
   failures=$((failures+1))

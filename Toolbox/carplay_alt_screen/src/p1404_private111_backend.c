@@ -990,6 +990,12 @@ static int teardown_private(void *receiver,
     altscreen_log("PHASE=STREAM_111_WORKER_STOP_REQUEST receiver=%p session=%p phase=%d worker_started=%d worker_done=%d listener=%d port=%u",
                   receiver, alt_screen_session, phase, worker_started, worker_done, listener, (unsigned)port);
 
+    /* The worker is about to be joined under the outer teardown lease. It
+     * cannot acquire that lease itself to submit stopUI. Send from this owner
+     * while the receiver channel and private stream are still alive. */
+    if (phase == ALT111_W_STREAMING && alt_screen_stream)
+        (void)p1404_cockpit_native_stop_ui(receiver, alt_screen_stream);
+
     if (worker_started && !worker_done) {
         if ((phase == ALT111_W_PREPARED || phase == ALT111_W_ACCEPTING) && listener >= 0)
             (void)wake_listener(receiver, port);

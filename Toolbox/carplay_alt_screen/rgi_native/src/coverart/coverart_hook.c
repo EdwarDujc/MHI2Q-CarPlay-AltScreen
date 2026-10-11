@@ -121,6 +121,7 @@ static pthread_cond_t worker_cond = PTHREAD_COND_INITIALIZER;
 static uint8_t* pending_data = NULL;     /* owned by queue */
 static size_t pending_len = 0;
 static int worker_started = 0;           /* guarded by worker_mutex */
+static int worker_starting = 0;          /* creation reserved, handle not published */
 static int worker_shutdown = 0;          /* guarded by worker_mutex */
 static int worker_exited = 0;            /* guarded by worker_mutex */
 
@@ -654,32 +655,22 @@ static void* coverart_worker_main(void* arg) {
  * worker frees it.  The worker is created lazily for the first complete
  * image.  Never fall back to inline decode: this function is called from the
  * stock NmeIAP2Link receive thread and blocking it can wedge the session. */
-static void enqueue_image_async(uint8_t* data, size_t len, uint32_t generation) {
-    int create_rc = 0;
-    int started_now = 0;
+static int enqueue_image_async(uint8_t* data, size_t len, uint32_t generation) {
+    int start_needed = 0;
 
-    if (!data) return;
+    if (!data) return 0;
 
     pthread_mutex_lock(&worker_mutex);
     if (worker_shutdown || generation != worker_generation) {
         pthread_mutex_unlock(&worker_mutex);
         free(data);
-        return;
+        return 0;
     }
 
-    if (!worker_started) {
+    if (!worker_started && !worker_starting) {
         worker_exited = 0;
-        create_rc = pthread_create(&worker_thread, NULL, coverart_worker_main, NULL);
-        if (create_rc != 0) {
-            pthread_mutex_unlock(&worker_mutex);
-            LOG_ERROR(LOG_MODULE,
-                      "Failed to start lazy cover-art worker rc=%d; dropping image to protect iAP2 receive thread",
-                      create_rc);
-            free(data);
-            return;
-        }
-        worker_started = 1;
-        started_now = 1;
+        worker_starting = 1;
+        start_needed = 1;
     }
 
     if (pending_data) {
@@ -692,8 +683,27 @@ static void enqueue_image_async(uint8_t* data, size_t len, uint32_t generation) 
     pthread_cond_signal(&worker_cond);
     pthread_mutex_unlock(&worker_mutex);
 
-    if (started_now)
-        LOG_INFO(LOG_MODULE, "Lazy joinable cover-art worker started");
+    return start_needed;
+}
+
+/* Handle creation outside BOTH receive and queue locks. A concurrent image
+ * may coalesce into the reserved queue, but cannot create a second worker. */
+static void start_coverart_worker(void) {
+    pthread_t created;
+    int rc = pthread_create(&created, NULL, coverart_worker_main, NULL);
+    pthread_mutex_lock(&worker_mutex);
+    worker_starting = 0;
+    if (rc == 0) {
+        worker_thread = created;
+        worker_started = 1;
+    } else {
+        free(pending_data); pending_data = NULL; pending_len = 0;
+        worker_exited = 1;
+    }
+    pthread_cond_broadcast(&worker_cond);
+    pthread_mutex_unlock(&worker_mutex);
+    if (rc == 0) LOG_INFO(LOG_MODULE, "Lazy joinable cover-art worker started");
+    else LOG_ERROR(LOG_MODULE, "Cover-art worker creation failed rc=%d; retry on next image", rc);
 }
 
 /* NmeTransport::Recv seam — the sole cover-art input.  Fed by the framework's
@@ -701,6 +711,7 @@ static void enqueue_image_async(uint8_t* data, size_t len, uint32_t generation) 
  * FF 5A stream once so an on-unit run can verify the seam carries link frames. */
 static void handle_recv_stream(const uint8_t* buf, size_t len) {
     if (!buf || len == 0) return;
+    int start_needed = 0;
 
     pthread_mutex_lock(&recv_mutex);
     uint8_t* process_buf = NULL;
@@ -744,11 +755,12 @@ static void handle_recv_stream(const uint8_t* buf, size_t len) {
     }
 
     if (process_buf) {
-        enqueue_image_async(process_buf, process_len, generation);
+        start_needed = enqueue_image_async(process_buf, process_len, generation);
     }
     /* Preserve completion order through enqueue: a delayed older callback
      * cannot replace the newer pending image from a concurrent Recv. */
     pthread_mutex_unlock(&recv_mutex);
+    if (start_needed) start_coverart_worker();
 }
 
 static int coverart_callback_enter(void) {
@@ -882,16 +894,16 @@ static void coverart_runtime_shutdown(void) {
         pending_len = 0;
     }
     pthread_cond_signal(&worker_cond);
-    if (worker_started) {
-        thread_to_join = worker_thread;
+    if (worker_started || worker_starting) {
         worker_quiesced = worker_exited;
         wait_rc = 0;
         coverart_deadline_after_ms(&deadline, COVERART_WORKER_DRAIN_MS);
-        while (!worker_exited && wait_rc != ETIMEDOUT)
+        while ((worker_starting || !worker_exited) && wait_rc != ETIMEDOUT)
             wait_rc = pthread_cond_timedwait(&worker_cond, &worker_mutex,
                                              &deadline);
-        worker_quiesced = worker_exited;
-        join_worker = worker_quiesced;
+        worker_quiesced = !worker_starting && worker_exited;
+        join_worker = worker_quiesced && worker_started;
+        if (join_worker) thread_to_join = worker_thread;
     }
     pthread_mutex_unlock(&worker_mutex);
 

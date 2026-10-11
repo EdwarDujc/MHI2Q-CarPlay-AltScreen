@@ -28,3 +28,9 @@ supervisor_parent_loss=WATCHDOG_EXIT_RELEASE_LEASE
 supervisor_watchdog_create_failure=FAIL_RETRY
 altscreen_active_marker=/tmp/mmi-altscreen-active
 altscreen_ready_marker=/tmp/mmi-altscreen-basevideo.ready
+
+runtime_review_date=2026-10-11
+runtime_review_host_validation=PASS
+runtime_review_vehicle_validation=PENDING
+supervisor_clock=NATIVE_MONOTONIC_SECONDS_NO_DISPLAY_INITIALIZATION
+supervisor_restart_budget=RESET_AFTER_60_SECOND_STABLE_RUN_DATE_INDEPENDENT

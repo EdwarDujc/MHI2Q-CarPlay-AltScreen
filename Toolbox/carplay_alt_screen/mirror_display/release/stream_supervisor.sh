@@ -7,6 +7,12 @@ set -eu
 
 PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
 export PATH
+# Kernel election runs inside the display ELF, which also loads EGL/GLES.
+# Cold boot and GEM do not necessarily provide the application's loader path.
+if [ -d /proc/boot ] && [ -d /mnt/app ]; then
+  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/proc/boot:/usr/lib:/armle/lib:/armle/lib/dll:/lib:/mnt/app/root/carplay-altscreen/lib:/eso/lib:/mnt/app/usr/lib:/mnt/app/armle/lib:/mnt/app/armle/lib/dll:/mnt/app/armle/usr/lib:/lib/dll
+  export LD_LIBRARY_PATH
+fi
 
 case "$0" in
   */*) ROOT=${0%/*} ;;
@@ -41,8 +47,6 @@ altscreen_display_precheck() {
     return 0
 }
 
-altscreen_display_precheck || exit 5
-
 TMP_ROOT="${ALT111_MIRROR_TMP_ROOT:-/tmp}"
 PIDFILE="$TMP_ROOT/altscreen_stream_supervisor.pid"
 STATEFILE="$TMP_ROOT/altscreen_stream_supervisor.active"
@@ -52,11 +56,14 @@ ACTIVE="${ALT111_MIRROR_ACTIVE_FILE:-$TMP_ROOT/mmi-altscreen-active}"
 MIRROR_PID="$TMP_ROOT/altscreen_mirror.pid"
 START="$ROOT/start_vehicle.sh"
 STOP="$ROOT/stop_vehicle.sh"
+STOP_GUARD="$TMP_ROOT/altscreen_mirror.stop.requested"
 
 [ -x "$START" ] || { echo "ERROR missing start_vehicle.sh" >&2; exit 2; }
 [ -x "$STOP" ] || { echo "ERROR missing stop_vehicle.sh" >&2; exit 2; }
 
 if [ "${1:-}" != --lease-held ]; then
+  [ ! -f "$STOP_GUARD" ] || exit 0
+  altscreen_display_precheck || exit 5
   # Repeated START can rearm RGI independently; its own lease elects one owner.
   if [ -s "$PIDFILE" ] && [ -x "$ROOT/rgi_supervisor.sh" ]; then
     /bin/sh "$ROOT/rgi_supervisor.sh" 9>&- >> "$LOGFILE" 2>&1 &
@@ -67,8 +74,8 @@ if [ "${1:-}" != --lease-held ]; then
 fi
 exec 9>&9 || exit 2
 [ "${ALT111_STREAM_SUPERVISOR_OWNER:-}" = "$$" ] || exit 2
-
-echo "$$" > "$PIDFILE"
+[ ! -f "$STOP_GUARD" ] || exit 0
+altscreen_display_precheck || exit 5
 : > "$LOGFILE"
 echo "STREAM_SUPERVISOR=STARTED pid=$$ policy=private111_stable_frames_no_fixed_delay marker=$STREAM_READY" >> "$LOGFILE"
 
@@ -128,8 +135,9 @@ if [ -x "$ROOT/rgi_supervisor.sh" ]; then
 fi
 trap cleanup 0
 trap 'exit 0' 1 2 15
+echo "$$" > "$PIDFILE"
 
-while :; do
+while [ ! -f "$STOP_GUARD" ]; do
   KEY=$(read_stream_key 2>/dev/null || true)
   OLD_KEY=$(cat "$STATEFILE" 9>&- 2>/dev/null || true)
 

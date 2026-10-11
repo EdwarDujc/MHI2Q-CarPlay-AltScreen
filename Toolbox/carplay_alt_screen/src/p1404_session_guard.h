@@ -7,7 +7,8 @@ enum alt_session_operation {
     ALT_SESSION_START,
     ALT_SESSION_CONTROL,
     ALT_SESSION_TEARDOWN,
-    ALT_SESSION_COMMAND
+    ALT_SESSION_COMMAND,
+    ALT_SESSION_STOP_COMMAND /* lifecycle owner may send stopUI before joining */
 };
 
 enum alt_session_admission {

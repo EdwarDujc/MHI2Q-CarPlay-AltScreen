@@ -558,11 +558,30 @@ if [ "${ALTS_START_DEFER_SUPERVISOR:-0}" = 1 ]; then
     SUP_PID=deferred
     echo "STREAM_SUPERVISOR=DEFERRED_TO_REBOOT launcher=boot_autostart"
 else
-    /bin/sh "$MIRROR_SUPERVISOR" >/dev/null 2>&1 &
-    sleep 1
-    SUP_PID=$(cat "$SUPERVISOR_PID" 2>/dev/null || true)
-    case "$SUP_PID" in ''|*[!0-9]*) fail "stream supervisor pid unavailable" ;; esac
-    kill -0 "$SUP_PID" 2>/dev/null || fail "stream supervisor exited during startup"
+    /bin/sh "$MIRROR_SUPERVISOR" >> "$SUPERVISOR_LOG" 2>&1 &
+    SUP_LAUNCH_PID=$!
+    SUP_LAUNCH_DONE=0
+    SUP_WAIT=0
+    SUP_PID=""
+    # Loader/process inventory can take longer than one second at cold boot.
+    # A pidfile is accepted only while its owner is alive; retries are bounded.
+    while [ "$SUP_WAIT" -lt 10 ]; do
+        SUP_PID=$(cat "$SUPERVISOR_PID" 2>/dev/null || true)
+        case "$SUP_PID" in
+            ''|*[!0-9]*) ;;
+            *) if kill -0 "$SUP_PID" 2>/dev/null; then break; fi ;;
+        esac
+        if [ "$SUP_LAUNCH_DONE" = 0 ] && ! kill -0 "$SUP_LAUNCH_PID" 2>/dev/null; then
+            SUP_LAUNCH_RC=0
+            wait "$SUP_LAUNCH_PID" || SUP_LAUNCH_RC=$?
+            SUP_LAUNCH_DONE=1
+            [ "$SUP_LAUNCH_RC" -eq 0 ] || fail_rc "$SUP_LAUNCH_RC" "stream supervisor launcher failed; see $SUPERVISOR_LOG"
+        fi
+        sleep 1
+        SUP_WAIT=$((SUP_WAIT + 1))
+    done
+    case "$SUP_PID" in ''|*[!0-9]*) fail "stream supervisor pid unavailable after bounded startup wait; see $SUPERVISOR_LOG" ;; esac
+    kill -0 "$SUP_PID" 2>/dev/null || fail "stream supervisor exited during startup; see $SUPERVISOR_LOG"
     echo "STREAM_SUPERVISOR=RUNNING pid=$SUP_PID marker=$STREAM_READY"
 fi
 

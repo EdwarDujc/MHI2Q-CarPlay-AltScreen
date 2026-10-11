@@ -1019,7 +1019,9 @@ static int guarded_command_submit(airplay_send_command_fn submit,
                                   void *receiver, cf_obj command,
                                   struct alt111_event_context *ctx) {
     struct alt_session_lease lease;
-    int admission = alt_session_guard_enter(receiver, ALT_SESSION_COMMAND, &lease);
+    enum alt_session_operation operation = ctx && ctx->event_kind == ALT111_EVENT_STOP_UI ?
+        ALT_SESSION_STOP_COMMAND : ALT_SESSION_COMMAND;
+    int admission = alt_session_guard_enter(receiver, operation, &lease);
     int rc = -6752;
     if (admission == ALT_SESSION_ENTERED) {
         /* Teardown may have completed between the caller's retain and this
