@@ -614,23 +614,31 @@ public final class ClusterStateController {
 
             String verifyReason = "already-active";
             if (actual == CTX_COMPOSITE && rebindRgi) {
-                if (!hasRgiRefreshContext(dm)) {
-                    contextFailure("map-preserving RGI refresh context unavailable");
-                    return;
-                }
-                if (!selectContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh")
-                    || !verifyContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh")) {
-                    contextFailure("RGI refresh readback failed");
-                    return;
-                }
+                boolean refreshAvailable = hasRgiRefreshContext(dm);
+                boolean refreshVerified = refreshAvailable
+                    && selectContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh")
+                    && verifyContext(dm, CTX_RGI_REFRESH, "rgi-map-refresh");
                 /* A ready RGI window now gets a fresh composition binding.
-                 * No 180ms OEM-map dwell; displayable3 stays in both contexts. */
+                 * Prefer the map-preserving context, but some DSI versions
+                 * reject the added slot. Use the established bounce only on
+                 * that failure; neither path acknowledges an unverified 80. */
                 if (!stillWantComposite()) return;
+                if (!refreshVerified) {
+                    diag("RGI_REFRESH_FALLBACK ctx81="
+                        + (refreshAvailable ? "select-or-readback-failed" : "unavailable")
+                        + " fallback=72->80");
+                    if (!selectContext(dm, CTX_BOUNCE, "rgi-fallback-bounce")) {
+                        contextFailure("RGI fallback ctx72 bounce failed");
+                        return;
+                    }
+                    sleep(BOUNCE_MS);
+                    if (!stillWantComposite()) return;
+                }
                 if (!selectContext(dm, CTX_COMPOSITE, "rgi-composite")) {
                     contextFailure("RGI composite enter failed");
                     return;
                 }
-                verifyReason = "rgi-composite";
+                verifyReason = refreshVerified ? "rgi-composite" : "rgi-fallback-composite";
             } else if (actual != CTX_COMPOSITE) {
                 boolean refreshActual = actual == CTX_RGI_REFRESH && hasRgiRefreshContext(dm);
                 if (!refreshActual &&
