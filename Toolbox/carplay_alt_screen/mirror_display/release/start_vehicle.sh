@@ -176,11 +176,11 @@ if [ -n "$RESTART_REASON" ]; then
     echo "MIRROR_SESSION_RESTART reason=$RESTART_REASON launcher_pid=$$"
   } >> "$LOGFILE"
 else
-  : > "$LOGFILE"
+  printf '' > "$LOGFILE"
 fi
 
 {
-  echo "MIRROR_LAUNCH_ENV=READY pid=$ bin=$BIN volatile_mode=$VOLATILE_MODE restart_reason=${RESTART_REASON:-NONE} restart_count=$RESTART_COUNT max_abnormal_restarts=$MAX_ABNORMAL_RESTARTS recover_current_session=$RECOVER_CURRENT_SESSION"
+  echo "MIRROR_LAUNCH_ENV=READY pid=$$ bin=$BIN volatile_mode=$VOLATILE_MODE restart_reason=${RESTART_REASON:-NONE} restart_count=$RESTART_COUNT max_abnormal_restarts=$MAX_ABNORMAL_RESTARTS recover_current_session=$RECOVER_CURRENT_SESSION"
   echo "PATH=$PATH"
   echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
   echo "HOOK_LOG=$HOOK_LOG"

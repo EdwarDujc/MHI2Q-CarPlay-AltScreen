@@ -31,6 +31,10 @@ static volatile unsigned g_pf_guard;
 /* Protected by the same lock as rule mutations. Fixed size, no queue or heap
  * lifetime; a later open of the same port invalidates an older cleanup lease. */
 static uint32_t g_pf_port_generations[65536];
+/* A lease owns cleanup only if this process actually added the rule. A
+ * pre-existing OEM/other-tool pass may permit our connection, but is not ours
+ * to delete when that connection stops. Same-process reopens retain ownership. */
+static unsigned char g_pf_port_rule_added[65536];
 static uint32_t g_pf_generation;
 /* Kernel ownership survives thread overlap and vanishes on process exit.
  * TCP 19803 serializes whole-rule transactions; UDP loopback on the exact
@@ -128,13 +132,20 @@ static int port_token_matches(const char *line, size_t n, const char *prefix, si
 }
 static int is_our_rule(const char *line, size_t n, uint16_t port) {
     char a[160], b[160];
+    const char *tail, *end = line + n;
     int na = snprintf(a, sizeof(a),
         "pass in quick on carplay0 proto tcp from any to any port = %u", (unsigned)port);
     int nb = snprintf(b, sizeof(b),
         "pass in quick on carplay0 proto tcp from any to any port %u", (unsigned)port);
     if (na <= 0 || nb <= 0) return 0;
-    return port_token_matches(line, n, a, (size_t)na) ||
-           port_token_matches(line, n, b, (size_t)nb);
+    if (port_token_matches(line, n, a, (size_t)na)) tail = line + na;
+    else if (port_token_matches(line, n, b, (size_t)nb)) tail = line + nb;
+    else return 0;
+    /* Recognize only the complete canonical rule that we emit. Tags, labels,
+     * extra constraints and state options belong to another rule owner. */
+    if (!pf_token(&tail, end, "keep") || !pf_token(&tail, end, "state")) return 0;
+    while (tail < end && (*tail == ' ' || *tail == '\t' || *tail == '\r')) ++tail;
+    return tail == end;
 }
 
 static int append_bytes(char *out, size_t cap, size_t *used,
@@ -178,13 +189,18 @@ int p1404_alt111_firewall_rewrite(const char *rules, uint16_t port, int enable,
         size_t n;
         nl = strchr(cur, '\n');
         n = nl ? (size_t)(nl - cur) : strlen(cur);
-        if (is_our_rule(cur, n, port)) {
+        /* Opening only inserts our aperture. A pre-existing identical rule
+         * after a terminal block is ineffective but still belongs to its old
+         * owner. Cleanup removes at most our first effective aperture. */
+        if (!enable && !blocker && !changed && is_our_rule(cur, n, port)) {
             changed = 1;
         } else {
-            if (enable && !blocker && is_blocker(cur, n)) {
-                if (!append_bytes(out, out_cap, &used, rule, (size_t)rule_n)) return 0;
+            if (is_blocker(cur, n)) {
+                if (enable && !blocker) {
+                    if (!append_bytes(out, out_cap, &used, rule, (size_t)rule_n)) return 0;
+                    changed = 1;
+                }
                 blocker = 1;
-                changed = 1;
             }
             if (!append_bytes(out, out_cap, &used, cur, n)) return 0;
             if (nl && !append_bytes(out, out_cap, &used, "\n", 1u)) return 0;
@@ -380,6 +396,11 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
         ok = 1;
         goto done;
     }
+    if (lease && !enable && !g_pf_port_rule_added[port]) {
+        g_pf_stage = "preexisting_rule_preserved";
+        ok = 1;
+        goto done;
+    }
     if (enable && g_pf_generation == UINT32_MAX) {
         /* Never wrap an ownership identity onto a still-pending lease. */
         errno = EIO;
@@ -455,6 +476,7 @@ done:
     if (fp) fclose(fp);
     free(after); free(before);
     if (enable && ok) {
+        if (changed) g_pf_port_rule_added[port] = 1;
         g_pf_port_generations[port] = ++g_pf_generation;
         if (new_owner >= 0) { g_pf_owner_fds[port] = new_owner + 1; new_owner = -1; }
         if (lease) { lease->port = port; lease->generation = g_pf_generation; }
@@ -462,6 +484,9 @@ done:
         /* A consumed failed cleanup can leave a rule, but cannot own any future
          * connection. A new open will get a fresh identity even if rule exists. */
         g_pf_port_generations[port] = 0;
+        /* A failed removal may have left our aperture in PF. Keep its known
+         * provenance so a later same-process reopen can still remove it. */
+        if (ok) g_pf_port_rule_added[port] = 0;
         if (g_pf_owner_fds[port]) close(g_pf_owner_fds[port] - 1);
         g_pf_owner_fds[port] = 0;
     }

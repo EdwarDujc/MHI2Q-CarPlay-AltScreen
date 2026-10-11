@@ -186,7 +186,7 @@ cycle() {
     # this emergency trim is explicitly recorded, never advertised as lossless.
     if [ -f "$LIVE/system_source.raw" ] && [ "$(wc -c < "$LIVE/system_source.raw")" -ge 8388608 ]; then
         event "SYSTEM_RAW_TRIM possible_boundary_loss=1 limit_bytes=8388608"
-        : > "$LIVE/system_source.raw"
+        printf '' > "$LIVE/system_source.raw"
     fi
 }
 finish() {

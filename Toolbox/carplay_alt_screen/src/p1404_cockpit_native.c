@@ -18,6 +18,7 @@
  */
 #include "p1404_cockpit_native.h"
 #include "p1404_lock_wait.h"
+#include "p1404_mono_us32.h"
 #include "p1404_abi.h"
 #include "p1404_airplay.h"
 #include "altscreen_core.h"
@@ -747,8 +748,8 @@ static int native_read_cluster_owned_for_zoom(void) {
  * therefore retarget immediately.
  *
  * Wheel timing intentionally uses its own modular 32-bit microsecond clock.
- * obs_now_us() is legacy seconds despite its name and remains untouched because
- * route/lifecycle timeouts depend on those second-based semantics.
+ * Lifecycle timers retain their seconds-based thresholds, using the same
+ * monotonic clock. Observer log timestamps remain on their original clock.
  */
 #define WHEEL_ZOOM_EVENT_MODEL "OEM_STEPS_V1"
 #define WHEEL_ZOOM_SCHEDULER_MODEL "OEM_TARGET_FOLLOW_V1"
@@ -776,11 +777,7 @@ static int native_read_cluster_owned_for_zoom(void) {
 #define WHEEL_ZOOM_STALL_ABORT_US 1200000u
 
 static uint32_t wheel_now_us32(void) {
-    struct timeval tv;
-    if (gettimeofday(&tv, NULL) != 0) return 0u;
-    /* All wheel thresholds are <=1.2 s, so modular subtraction remains safe
-     * across the 32-bit wrap while matching the decoded tap time base exactly. */
-    return (uint32_t)tv.tv_sec * 1000000u + (uint32_t)tv.tv_usec;
+    return p1404_monotonic_us32();
 }
 
 /*
@@ -994,7 +991,7 @@ static void native_check_view_area_fresh_frame(
     uint32_t baseline_generation = 0;
     uint32_t baseline_count = 0;
     uint64_t ack_at = 0;
-    uint64_t now = obs_now_us();
+    uint64_t now = p1404_monotonic_seconds();
     int view_area_index = -1;
     int baseline_valid = 0;
     int pending = 0;
@@ -1310,11 +1307,11 @@ static void *native_monitor_worker(void *arg) {
     for (;;) {
         /*
          * Wheel target-follow uses a 50 ms scheduler quantum so the adaptive
-         * 100/150/200 ms pacing states remain exactly representable. The existing lifecycle
-         * clock remains obs_now_us() seconds; only wheel timing uses us32.
+         * 100/150/200 ms pacing states remain exactly representable. Lifecycle
+         * timers use monotonic seconds; wheel/frame pacing uses modular us32.
          */
         usleep(WHEEL_ZOOM_MONITOR_TICK_US);
-        now = obs_now_us();
+        now = p1404_monotonic_seconds();
         wheel_now = wheel_now_us32();
 
         /*
@@ -1951,7 +1948,7 @@ void p1404_cockpit_native_view_area_result(void *receiver, void *stream,
                                             int status,
                                             int response_received) {
     struct native_slot *slot;
-    uint64_t result_now = obs_now_us();
+    uint64_t result_now = p1404_monotonic_seconds();
     int accepted = status == 0 && response_received;
     int applied = 0;
     int stale = 0;
@@ -2731,7 +2728,7 @@ int p1404_hook_cscreen_render(void *self, unsigned char *buffer) {
         }
     }
 
-    now = obs_now_us();
+    now = p1404_monotonic_seconds();
     native_lock();
     slot = find_renderer_locked(self);
     if (slot && slot->generation == generation && slot->stream == stream) {

@@ -2,6 +2,7 @@
 #include "cluster_video_display.h"
 #include "startup_logo.h"
 #include "state_snapshot.h"
+#include "bounded_output.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -1031,12 +1032,12 @@ int main(int argc, char **argv) {
     bool in_stall = false;
     unsigned long long stall_start_us = 0;
     unsigned long stats_presented_base = display.frame_count();
-    unsigned long long stats_start = now_us();
-    unsigned long long next_ownership_probe_us = now_us() + 500000ULL;
-    unsigned long long next_layout_probe_us = now_us() + 50000ULL;
+    unsigned long long stats_start = monotonic_us();
+    unsigned long long next_ownership_probe_us = monotonic_us() + 500000ULL;
+    unsigned long long next_layout_probe_us = monotonic_us() + 50000ULL;
 
     while (!g_stop) {
-        const unsigned long long frame_start = now_us();
+        const unsigned long long frame_start = monotonic_us();
 
         if (!next_layout_probe_us ||
             (frame_start && frame_start >= next_layout_probe_us)) {
@@ -1046,13 +1047,14 @@ int main(int argc, char **argv) {
         }
         if (!next_ownership_probe_us ||
             (frame_start && frame_start >= next_ownership_probe_us)) {
+            bound_private_output();
             publish_displayable_state(display, &source, "periodic");
             next_ownership_probe_us = frame_start + 500000ULL;
         }
 
         if (source.read_frame(&frame)) {
             if (in_stall) {
-                const unsigned long long now = now_us();
+                const unsigned long long now = monotonic_us();
                 const unsigned long long stall_ms =
                     (now && stall_start_us && now >= stall_start_us)
                         ? (now - stall_start_us) / 1000ULL : 0;
@@ -1076,7 +1078,7 @@ int main(int argc, char **argv) {
             }
         } else {
             ++failures;
-            const unsigned long long idle_now = now_us();
+            const unsigned long long idle_now = monotonic_us();
             if (!stall_start_us)
                 stall_start_us = idle_now;
 
@@ -1120,7 +1122,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        const unsigned long long now = now_us();
+        const unsigned long long now = monotonic_us();
         if (now && stats_start && now - stats_start >= 10000000ULL) {
             const unsigned long long span = now - stats_start;
             const unsigned long total_presented = display.frame_count();

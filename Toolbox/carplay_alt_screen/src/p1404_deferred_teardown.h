@@ -1,3 +1,4 @@
+#include "p1404_lock_wait.h"
 /* Included after fullchain_teardown_admitted. Each task holds the receiver,
  * request and a guard reservation until cleanup, so timeout cannot lose the
  * request or forget that another full teardown already completed. */
@@ -15,7 +16,7 @@ static struct fullchain_deferred_teardown deferred_teardowns[ALT_DEFERRED_TEARDO
 static volatile unsigned deferred_teardown_lock;
 
 static void deferred_teardown_acquire(void) {
-    while (__sync_lock_test_and_set(&deferred_teardown_lock, 1u)) usleep(1000u);
+    while (__sync_lock_test_and_set(&deferred_teardown_lock, 1u)) p1404_lock_wait_yield();
 }
 static void deferred_teardown_release(void) {
     __sync_lock_release(&deferred_teardown_lock);
@@ -65,8 +66,9 @@ static int fullchain_defer_teardown(void *receiver, const void *params, int reas
     int (*create_fn)(pthread_t *, const void *, void *(*)(void *), void *);
     int (*detach_fn)(pthread_t);
     int full, rc;
+    unsigned scope;
     unsigned i;
-    (void)fullchain_teardown_scope(params, &full);
+    scope = fullchain_teardown_scope(params, &full);
     detach_fn = (int (*)(pthread_t))dlsym(RTLD_DEFAULT, "pthread_detach");
     create_fn = (int (*)(pthread_t *, const void *, void *(*)(void *), void *))
         dlsym(RTLD_DEFAULT, "pthread_create");
@@ -97,7 +99,7 @@ static int fullchain_defer_teardown(void *receiver, const void *params, int reas
         deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
         return 0;
     }
-    if (!alt_session_guard_defer(fence)) {
+    if (!alt_session_guard_defer(fence, full || (scope & (TEARDOWN_MAIN | TEARDOWN_ALT)))) {
         if (params) alt_airplay_release_object((void *)params);
         deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
         return 0;

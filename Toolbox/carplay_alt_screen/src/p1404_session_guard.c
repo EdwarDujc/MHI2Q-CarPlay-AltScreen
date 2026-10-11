@@ -1,3 +1,4 @@
+#include "p1404_lock_wait.h"
 /* Included by the fullchain wrapper; also compiled directly by host tests. */
 #include "p1404_session_guard.h"
 #include <string.h>
@@ -24,7 +25,7 @@ static volatile unsigned session_guards_lock;
 static void session_guards_acquire(void) {
     /* Metadata only. Never hold this lock across stock calls, joins or logging.
      * Yield even here: a higher-priority QNX waiter must not starve its owner. */
-    while (__sync_lock_test_and_set(&session_guards_lock, 1u)) usleep(1000u);
+    while (__sync_lock_test_and_set(&session_guards_lock, 1u)) p1404_lock_wait_yield();
 }
 
 static void session_guards_release(void) {
@@ -103,7 +104,8 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
         /* A stalled OEM submitter must not pin another lifecycle caller
          * forever. Refusal preserves its resources and reports unfinished;
          * it never permits teardown to overlap a command. */
-        if (operation != ALT_SESSION_DEFERRED_TEARDOWN && lease->waited >= ALT_SESSION_WAIT_POLLS) {
+        if (lease->waited >= (operation == ALT_SESSION_DEFERRED_TEARDOWN ?
+            (ALT_SESSION_WAIT_POLLS + 49u) / 50u : ALT_SESSION_WAIT_POLLS)) {
             session_guards_release();
             return ALT_SESSION_REFUSED;
         }
@@ -114,10 +116,11 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
     }
 }
 
-int alt_session_guard_defer(struct alt_session_lease *lease) {
+int alt_session_guard_defer(struct alt_session_lease *lease, int blocks_lifecycle) {
     if (!lease->registered || lease->entered || lease->deferred) return 0;
     session_guards_acquire();
-    ++session_guards[lease->slot].pending_teardown;
+    if (blocks_lifecycle) ++session_guards[lease->slot].pending_teardown;
+    lease->blocks_lifecycle = blocks_lifecycle;
     lease->deferred = 1;
     session_guards_release();
     return 1;
@@ -143,7 +146,7 @@ void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed
     if (!lease->registered) return;
     slot = lease->slot;
     session_guards_acquire();
-    if (lease->deferred) --session_guards[slot].pending_teardown;
+    if (lease->deferred && lease->blocks_lifecycle) --session_guards[slot].pending_teardown;
     if (lease->entered) {
         if (full_completed) session_guards[slot].full_completed = 1;
         if (lease->operation == ALT_SESSION_TEARDOWN || lease->operation == ALT_SESSION_DEFERRED_TEARDOWN)

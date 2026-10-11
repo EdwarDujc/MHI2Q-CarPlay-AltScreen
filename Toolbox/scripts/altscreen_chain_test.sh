@@ -210,7 +210,7 @@ validate_runtime_sources(){
 precheck_app_runtime(){
     parent="$(p /mnt/app/root)"
     probe="$parent/.altscreen-write-test"
-    token="altscreen-write-test-$"
+    token="altscreen-write-test-$$"
     mount_app_rw || { echo "FAIL: cannot mount /mnt/app writable" >&2; return 1; }
     ok=1
     ensure_dirs "$parent" || ok=0
@@ -257,7 +257,7 @@ install_runtime_scripts(){
         return 1
     }
     if [ "${ALTS_INSTALL_RGI_MODE:-WITH}" = NO ]; then
-        : > "$RUNTIME_STAGE/state/rgi.disabled" || return 1
+        printf '' > "$RUNTIME_STAGE/state/rgi.disabled" || return 1
         chmod 644 "$RUNTIME_STAGE/state/rgi.disabled" || return 1
     fi
     echo "RUNTIME_STAGING_POLICY=BOUNDED path=/mnt/app/root/.carplay-altscreen.new legacy_pid_staging=reaped"
@@ -277,7 +277,8 @@ install_runtime_scripts(){
     ensure_dirs "$RUNTIME_STAGE/bin/mirror" || { rm -rf "$RUNTIME_STAGE" 2>/dev/null || true; mount_app_ro >/dev/null 2>&1 || true; return 1; }
     for name in carplay-alt111-mirror-display start_vehicle.sh stop_vehicle.sh stream_supervisor.sh rgi_supervisor.sh BUILD_INFO.txt LICENSE.MMI-MIRROR SHA256SUMS; do
         [ -f "$MIRROR_SD/$name" ] || continue
-        cp "$MIRROR_SD/$name" "$RUNTIME_STAGE/bin/mirror/$name" || {
+        cp "$MIRROR_SD/$name" "$RUNTIME_STAGE/bin/mirror/$name" &&
+        cmp -s "$MIRROR_SD/$name" "$RUNTIME_STAGE/bin/mirror/$name" || {
             rm -rf "$RUNTIME_STAGE" 2>/dev/null || true
             mount_app_ro >/dev/null 2>&1 || true
             return 1
@@ -386,6 +387,7 @@ cleanup_volatile_runtime(){
           "$(p /tmp/altscreen-private111.stream-ready)" "$(p /tmp/altscreen-private111.stream-ready.new)" \
           "$(p /tmp/altscreen_stream_supervisor.pid)" "$(p /tmp/altscreen_stream_supervisor.active)" \
           "$(p /tmp/altscreen_stream_supervisor.log)" \
+          "$(p /tmp/altscreen_rgi_supervisor.pid)" "$(p /tmp/altscreen_rgi_renderer.pid)" \
           "$(p /tmp/mmi-altscreen-active)" "$(p /tmp/mmi-altscreen-basevideo.ready)" \
           "$(p /tmp/mmi-altscreen-displayable3.state)" \
           "$(p /tmp/mmi-altscreen-displayable3.state.tmp)" \

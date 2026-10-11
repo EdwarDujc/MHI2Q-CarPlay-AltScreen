@@ -237,10 +237,10 @@ static volatile unsigned g_bearer_guard_lock;
 static struct bearer_guard_slot g_bearer_guard[BEARER_GUARD_SLOTS];
 
 static int bearer_guard_lock(void) {
-    int i;
-    for (i = 0; i < BEARER_GUARD_SPINS; ++i)
-        if (__sync_lock_test_and_set(&g_bearer_guard_lock, 1u) == 0u) return 1;
-    return 0;
+    /* Contention is not recursion: bypassing the assembler here can send new
+     * bytes ahead of a buffered packet on the same connection. */
+    while (__sync_lock_test_and_set(&g_bearer_guard_lock, 1u)) p1404_lock_wait_yield();
+    return 1;
 }
 static void bearer_guard_lock_wait(void) {
     while (__sync_lock_test_and_set(&g_bearer_guard_lock, 1u) != 0u) p1404_lock_wait_yield();
@@ -305,7 +305,8 @@ static int bearer_enter(void) {
         g_bearer_guard[free_slot].active = 1;
     }
     bearer_guard_unlock();
-    return free_slot < 0;
+    /* A full table is backpressure, not permission to skip tracked writes. */
+    return free_slot < 0 ? -1 : 0;
 }
 static void bearer_leave(void) {
     unsigned long tid = pthread_self();
@@ -703,6 +704,7 @@ static __attribute__((noinline)) ssize_t bearer_forward(
         return kind == BEARER_TX_SEND ? real_send(fd, buf, n, flags)
                                       : real_write(fd, buf, n);
     nested = bearer_enter();
+    if (nested < 0) { bearer_set_error(11); return -1; }
     if (!g_forward_ready) {
         if (!nested) bearer_leave();
         bearer_set_error(11);
@@ -869,6 +871,7 @@ ssize_t recv(int fd, void *buf, size_t n, int flags) {
     if (!altscreen_runtime_is_ready() || !p1404_armed)
         return real_recv(fd, buf, n, flags);
     nested = bearer_enter();
+    if (nested < 0) { bearer_set_error(11); return -1; }
     if (!g_forward_ready) {
         if (!nested) bearer_leave();
         bearer_set_error(11);
@@ -1051,6 +1054,7 @@ static __attribute__((noinline)) int bearer_close_forward(int fd) {
     if (!altscreen_runtime_is_ready() || !p1404_armed || fd < 0)
         return real_close(fd);
     nested = bearer_enter();
+    if (nested < 0) { bearer_set_error(11); return -1; }
     if (!g_forward_ready) {
         if (!nested) bearer_leave();
         bearer_set_error(11);
@@ -1185,6 +1189,7 @@ static ssize_t bearer_read_forward(int fd, void *buf, size_t n) {
     if (!altscreen_runtime_is_ready() || !p1404_armed || fd < 0 || !buf || !n)
         return real_read(fd, buf, n);
     nested = bearer_enter();
+    if (nested < 0) { bearer_set_error(11); return -1; }
     if (nested || !g_forward_ready) {
         if (!nested) bearer_leave();
         return real_read(fd, buf, n);

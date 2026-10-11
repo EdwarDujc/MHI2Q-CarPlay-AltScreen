@@ -1,5 +1,6 @@
 #include "private111_direct_tap.h"
 #include "p1404_lock_wait.h"
+#include "p1404_mono_us32.h"
 #include "private111_direct_shm.h"
 
 #include <dlfcn.h>
@@ -90,11 +91,7 @@ static int env_truth(const char *name, int default_value) {
 }
 
 static uint32_t tap_now_us32(void) {
-    struct timeval tv;
-    if (gettimeofday(&tv, NULL) != 0) return 0u;
-    /* Modular 32-bit microseconds are sufficient for sub-second readback timing
-     * and avoid pulling 64-bit divide helpers into the freestanding ARM hook. */
-    return (uint32_t)tv.tv_sec * 1000000u + (uint32_t)tv.tv_usec;
+    return p1404_monotonic_us32();
 }
 
 static void stream_ready_clear_locked(void) {
@@ -1017,6 +1014,11 @@ struct p111_linearizer_state {
 
 static struct p111_linearizer_state g_linearizer;
 static volatile unsigned g_linearizer_lock;
+static volatile unsigned g_linearizer_busy_drops;
+
+static int linearizer_try_lock(void) {
+    return __sync_lock_test_and_set(&g_linearizer_lock, 1u) == 0u;
+}
 
 static void linearizer_lock(void) {
     while (__sync_lock_test_and_set(&g_linearizer_lock, 1u) != 0u) p1404_lock_wait_yield();
@@ -1500,7 +1502,18 @@ int p111_frame_tap_write_window(void *stream, void *screen_window,
     }
     tap_unlock();
 
-    linearizer_lock();
+    /* This optional capture runs before OMX recycles its output buffer. Never
+     * queue another OEM render callback behind a slow Screen readback. Skip
+     * only this auxiliary copy; the stock frame was already posted and the
+     * next callback retries normally. Teardown still waits for the active
+     * reader before destroying its window/pixmap. */
+    if (!linearizer_try_lock()) {
+        unsigned drops = __sync_add_and_fetch(&g_linearizer_busy_drops, 1u);
+        if (drops == 1u || (drops & 255u) == 0u)
+            altscreen_log("WARN PHASE=FRAME_LINEARIZER_BUSY stream=%p skipped=%u action=KEEP_LAST_FRAME stock_render_unchanged=1 wait_us=0",
+                          stream, drops);
+        return 1;
+    }
     /* Teardown or replacement may have won while this callback waited. Never
      * create a pixmap/readback for a retired stream after that boundary. */
     tap_lock();

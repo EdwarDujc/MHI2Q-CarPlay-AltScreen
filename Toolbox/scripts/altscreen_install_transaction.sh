@@ -59,7 +59,7 @@ UNIVERSAL_DST="$(p "$UNIVERSAL_REL")"
 CHAIN_LOCK="$STATE/.chain_test.lock"
 
 ensure_dirs "$SD/logs" "$TXN_ROOT" || { echo "INSTALL=REFUSED reason=SD_NOT_WRITABLE production_changed=NO"; exit 1; }
-: >> "$LOG" 2>/dev/null || { echo "INSTALL=REFUSED reason=SD_LOG_NOT_WRITABLE production_changed=NO"; exit 1; }
+printf '' >> "$LOG" 2>/dev/null || { echo "INSTALL=REFUSED reason=SD_LOG_NOT_WRITABLE production_changed=NO"; exit 1; }
 exec 3>&1
 exec >> "$LOG" 2>&1
 log(){ echo "$*"; echo "$*" >&3; }
@@ -70,7 +70,7 @@ find_startup(){ for f in "$(p /mnt/system/etc/boot/startup.sh)" "$(p /etc/boot/s
 
 dir_manifest(){
   src=$1; out=$2
-  if [ ! -d "$src" ]; then : > "$out"; return 0; fi
+  if [ ! -d "$src" ]; then printf '' > "$out"; return 0; fi
   (
     cd "$src" || exit 1
     find . -type f -print 2>/dev/null | sort | while IFS= read -r rel; do
@@ -423,9 +423,8 @@ verify_installed(){
   case "${ALTS_INSTALL_RGI_MODE:-WITH}" in
     NO)
       [ -f "$RUNTIME/state/rgi.disabled" ] || { log "INSTALL_VERIFY=FAIL reason=NO_RGI_MARKER_MISSING"; return 1; }
-      if awk -v query=/mnt/app/root/carplay-altscreen/lib/libcarplay_rgi_meta.so -f "$PRELOAD_AWK" "$SI" >/dev/null 2>&1; then
-        log "INSTALL_VERIFY=FAIL reason=NO_RGI_PRELOAD_PRESENT"; return 1
-      fi
+      awk -v query=/mnt/app/root/carplay-altscreen/lib/libcarplay_rgi_meta.so -f "$PRELOAD_AWK" "$SI" >/dev/null 2>&1 ||
+        { log "INSTALL_VERIFY=FAIL reason=NO_RGI_COVERART_PRELOAD_MISSING"; return 1; }
       ;;
     WITH)
       [ ! -e "$RUNTIME/state/rgi.disabled" ] || { log "INSTALL_VERIFY=FAIL reason=WITH_RGI_DISABLED"; return 1; }

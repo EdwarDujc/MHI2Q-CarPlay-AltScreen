@@ -292,7 +292,7 @@ public final class ClusterStateController {
         String state = readSmallState(DISPLAYABLE3_STATE_FILE, 4096);
         boolean displayStateReadable = state.length() != 0;
         long stateTs = stateLong(state, "timestamp_ms", -1L);
-        long stateAge = stateTs >= 0L && now >= stateTs ? now - stateTs : -1L;
+        long stateAge = stateTs >= 0L && now >= stateTs ? System.currentTimeMillis() - stateTs : -1L;
         int backendReady = (int)stateLong(state, "backend_ready", -1L);
         int nativePresent = (int)stateLong(state, "native_window_present", -1L);
         int visibleValid = (int)stateLong(state, "visible_valid", -1L);
@@ -531,7 +531,7 @@ public final class ClusterStateController {
             + "ownership_intent=" + (intent ? "1" : "0") + "\n"
             + "composite_applied=" + (applied ? "1" : "0") + "\n"
             + "context=" + actual + "\n"
-            + "timestamp_ms=" + nowMs() + "\n";
+            + "timestamp_ms=" + System.currentTimeMillis() + "\n";
         if (writeAtomicState(CLUSTER_OWNERSHIP_STATE_FILE, text)) {
             lastClusterOwnershipSignature = signature;
             diag("cluster ownership published cp=" + (cp ? "1" : "0")
@@ -995,7 +995,7 @@ public final class ClusterStateController {
                     + "mode=OBSERVE_ONLY\n"
                     + "valid=1\n"
                     + "revision=" + nextRevision + "\n"
-                    + "timestamp_ms=" + now + "\n"
+                    + "timestamp_ms=" + System.currentTimeMillis() + "\n"
                     + "apply_to_carplay=0\n"
                     + "apply_to_renderer=0\n"
                     + "nav_view_size_choice=" + choiceValue + "\n"
@@ -1329,7 +1329,7 @@ public final class ClusterStateController {
                 + "observer=OEM_LAYOUT_OBSERVER_V1\n"
                 + "mode=OBSERVE_ONLY\n"
                 + "valid=0\n"
-                + "timestamp_ms=" + nowMs() + "\n"
+                + "timestamp_ms=" + System.currentTimeMillis() + "\n"
                 + "reason=" + sanitizeStateValue(status) + "\n"
                 + "apply_to_carplay=0\n"
                 + "apply_to_renderer=0\n";
@@ -1595,7 +1595,7 @@ public final class ClusterStateController {
     }
 
     private static long nowMs() {
-        return System.currentTimeMillis();
+        return com.luka.carplay.framework.ElapsedClock.nowMs();
     }
 
     private static void sleep(long ms) {

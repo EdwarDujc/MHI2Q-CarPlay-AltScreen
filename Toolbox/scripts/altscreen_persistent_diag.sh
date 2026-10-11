@@ -141,7 +141,7 @@ install_diag(){
     ALTS_RUNTIME=/mnt/app/root/carplay-altscreen/bin
     # Flat /tmp contract: this path is available without creating directories.
     ALTS_BOOT_ENTRY=/tmp/altscreen_boot_entry.log
-    if ( : >> "$ALTS_BOOT_ENTRY" ) 2>/dev/null; then
+    if ( printf '' >> "$ALTS_BOOT_ENTRY" ) 2>/dev/null; then
         exec >> "$ALTS_BOOT_ENTRY" 2>&1
     fi
     echo "BOOT_ENTRY pid=$$ universal_persistent_diag=1 runtime=$ALTS_RUNTIME"

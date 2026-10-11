@@ -543,7 +543,7 @@ public class BAPBridge {
             KOMOService nextKomo = cs.getKomoService();
             if (cs == this.csRef && nextKomo == this.komoService) return;
             if (this.csRef != null && cs != this.csRef) {
-                try { lowerBarKomo.clear(this.csRef); }
+                try { lowerBarKomo.clearForRebind(this.csRef); }
                 catch (Throwable t) { clusterAccessWarning("old KOMO clear failed: " + t); }
                 try { forceClusterRouteInfoState(false); }
                 finally {
@@ -554,6 +554,7 @@ public class BAPBridge {
             if (this.csRef != null) forceGfxAvailable(false);
             this.csRef = cs;
             this.komoService = nextKomo;
+            if (bapSessionStarted) lowerBarKomo.replay(cs);
             if (this.komoService != null) {
                 Log.i(TAG, "KOMO service acquired");
             } else {

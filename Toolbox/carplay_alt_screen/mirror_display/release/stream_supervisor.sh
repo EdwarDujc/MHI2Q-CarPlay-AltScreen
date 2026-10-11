@@ -76,7 +76,7 @@ exec 9>&9 || exit 2
 [ "${ALT111_STREAM_SUPERVISOR_OWNER:-}" = "$$" ] || exit 2
 [ ! -f "$STOP_GUARD" ] || exit 0
 altscreen_display_precheck || exit 5
-: > "$LOGFILE"
+printf '' > "$LOGFILE"
 echo "STREAM_SUPERVISOR=STARTED pid=$$ policy=private111_stable_frames_no_fixed_delay marker=$STREAM_READY" >> "$LOGFILE"
 
 read_stream_key() (
@@ -129,13 +129,15 @@ cleanup() {
   echo "STREAM_SUPERVISOR=STOPPED pid=$$" >> "$LOGFILE" 2>/dev/null || true
 }
 RGI_PID=""
+trap cleanup 0
+trap 'exit 0' 1 2 15
+printf '%s\n' "$$" > "$PIDFILE"
+# Close the lease-to-pid-publication STOP race before launching either child.
+[ ! -f "$STOP_GUARD" ] || exit 0
 if [ -x "$ROOT/rgi_supervisor.sh" ]; then
   /bin/sh "$ROOT/rgi_supervisor.sh" 9>&- >> "$LOGFILE" 2>&1 &
   RGI_PID=$!
 fi
-trap cleanup 0
-trap 'exit 0' 1 2 15
-echo "$$" > "$PIDFILE"
 
 while [ ! -f "$STOP_GUARD" ]; do
   KEY=$(read_stream_key 2>/dev/null || true)

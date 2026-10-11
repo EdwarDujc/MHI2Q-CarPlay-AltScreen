@@ -370,7 +370,7 @@ backup_originals() (
     stage="$STAGING_ROOT/universal-original.$$"
     [ ! -e "$BACKUP_DIR" ] || { say "FAIL: incomplete original backup exists"; return 1; }
     ensure_dirs "$stage/files" || return 1
-    : > "$stage/manifest.txt"; : > "$stage/overlay_present.txt"
+    printf '' > "$stage/manifest.txt"; printf '' > "$stage/overlay_present.txt"
     dio_rel=$(locate_first "$LIVE_DIO_CANDIDATES") || return 1
     nme_rel=$(locate_first "$LIVE_NME_CANDIDATES") || return 1
     for rel in "$dio_rel" "$LIVE_LIBAIRPLAY" "$nme_rel" "$LIVE_JSON_SI" "$LIVE_JSON_DIO"; do
@@ -567,7 +567,8 @@ cmd_install(){
         cfg_rgi="$TXN_DIR/rgi-preload-config"
         cfg="$TXN_DIR/universal-config"
         rgi_preload="$RGI_META_REL"
-        [ "$rgi_mode" != NO ] || rgi_preload=""
+        # The shared native library also receives song cover art. NO disables
+        # only the routeguidance module via the persistent rgi.disabled policy.
         awk -v hook="$rgi_preload" -v exclude2="$RGI_META_REL" -v allow_absent=1 \
             -v exclude=/mnt/app/root/hooks/libcarplay_hook.so \
             -v insert_if_absent=1 -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" > "$cfg_rgi" || goto_fail=1
@@ -587,11 +588,9 @@ cmd_install(){
     fi
     if [ "${goto_fail:-0}" != 1 ]; then
         awk -v query="$UNIVERSAL_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || goto_fail=1
+        awk -v query="$RGI_META_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || goto_fail=1
         if [ "$rgi_mode" = WITH ]; then
-            awk -v query="$RGI_META_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || goto_fail=1
             /bin/sh "$RGI_CONFIG" verify "$(p "$LIVE_JSON_DIO")" >/dev/null || goto_fail=1
-        elif awk -v query="$RGI_META_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null; then
-            goto_fail=1
         fi
     fi
     if [ "${goto_fail:-0}" != 1 ]; then remove_legacy_firewall_rule || goto_fail=1; fi

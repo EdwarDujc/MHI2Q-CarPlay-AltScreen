@@ -125,12 +125,21 @@ static void ensure_fw_lock_init(void) {
  * constructors reached LOG_INFO, whose lazy logger created a pthread while
  * ldqnx still owned the loader lock.  Register modules only after a real
  * Cinemo call proves that dio_manager and all dependencies are live. */
+static int native_rgi_disabled(void) {
+    return access("/mnt/app/root/carplay-altscreen/state/rgi.disabled", F_OK) == 0 ||
+           access("/tmp/mmi-rgi.disabled", F_OK) == 0;
+}
 static void init_modules_once(void) {
     size_t i;
+    int rgi_disabled = native_rgi_disabled();
     for (i = 0; i < hook_module_table_count; i++) {
         const hook_module_def_t* def = hook_module_table[i];
         if (!def) continue;
-        hook_framework_register_module(def);
+        if (rgi_disabled && def->name && strcmp(def->name, "routeguidance") == 0) {
+            LOG_INFO(LOG_MODULE, "NATIVE_MODULE_POLICY routeguidance=DISABLED coverart=ENABLED");
+            continue;
+        }
+        if (hook_framework_register_module(def) != HOOK_OK) continue;
         if (def->on_init) def->on_init();
     }
 }
@@ -140,9 +149,9 @@ static void init_modules_once(void) {
  * is what lets a module still publish a final bus message here. */
 static void shutdown_modules(void) {
     size_t i;
-    for (i = hook_module_table_count; i-- > 0;) {
-        const hook_module_def_t* def = hook_module_table[i];
-        if (def && def->on_shutdown) def->on_shutdown();
+    for (i = (size_t)g_fw.module_count; i-- > 0;) {
+        hook_module_t* module = &g_fw.modules[i];
+        if (module->active && module->def.on_shutdown) module->def.on_shutdown();
     }
 }
 
@@ -845,6 +854,9 @@ HOOK_EXPORT int CinemoCreateIAP(void* args) {
     pthread_mutex_lock(&g_fw.lock);
     old_iap = g_fw.cinemo_iap;
     old_owner_pid = g_fw.cinemo_iap_owner_pid;
+    if (old_iap != new_iap || old_owner_pid != (int)getpid()) {
+        if (!++g_fw.ctx.inject.generation) ++g_fw.ctx.inject.generation;
+    }
     g_fw.cinemo_iap = new_iap;
     g_fw.cinemo_iap_owner_pid = (int)getpid();
     if (g_fw.ctx.inject.linked)

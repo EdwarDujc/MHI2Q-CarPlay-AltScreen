@@ -552,7 +552,7 @@ backup_originals() (
     fi
     STAGE_DIR="${STAGE_DIR}.$$"
     ensure_dirs "$STAGE_DIR/files" || return 1
-    : > "$STAGE_DIR/manifest.txt" || return 1
+    printf '' > "$STAGE_DIR/manifest.txt" || return 1
     for rel in "$dio_rel" "$LIVE_LIBAIRPLAY" "$nme_rel" "$LIVE_JSON_SI" "$LIVE_JSON_DIO"; do
         src=$(p "$rel")
         nonempty "$src" || { say "FAIL: cannot back up missing source $rel"; return 1; }
@@ -575,7 +575,7 @@ backup_originals() (
         overlay_source_dir="$LEGACY_LIBTARGET"
     fi
     printf '%s\n' "$overlay_source_dir" > "$STAGE_DIR/overlay_dir.txt"
-    : > "$STAGE_DIR/overlay_present.txt"
+    printf '' > "$STAGE_DIR/overlay_present.txt"
     for n in libairplay.so libairplax.so libNmeBaseClasses.so; do
         if [ -f "$(p "$overlay_source_dir")/$n" ]; then
             cp "$(p "$overlay_source_dir")/$n" "$STAGE_DIR/files/overlay_$n" || return 1
@@ -734,7 +734,7 @@ install_boot_diagnostics() (
     export PATH LD_LIBRARY_PATH
     # Flat /tmp contract: boot diagnostics must not depend on mkdir support.
     ALTS_BOOT_ENTRY=/tmp/altscreen_boot_entry.log
-    if ( : >> "$ALTS_BOOT_ENTRY" ) 2>/dev/null; then
+    if ( printf '' >> "$ALTS_BOOT_ENTRY" ) 2>/dev/null; then
         exec >> "$ALTS_BOOT_ENTRY" 2>&1
     fi
     echo "BOOT_ENTRY pid=$$"

@@ -218,7 +218,7 @@ flat_audio_capture() (
     audio_output="${FLAT_PREFIX}_audio.chunk"
     { [ ! -f "$audio_partial" ] || cat "$audio_partial"; cat "$1"; } > "$audio_input" || exit 1
     complete=0; [ -n "$(tail -c 1 "$1")" ] || complete=1
-    : > "$audio_partial"
+    printf '' > "$audio_partial"
     awk -v complete="$complete" -v pending="$audio_partial" '
       function emit(line) {
         if (line ~ /AudioStream|CQNXSoundIF|RTP_AUDIO|ann3_dio_ann|io-audio|audio_service|<AUDIO>|AUDIO_FINALIZE|Modes changed|audioThreadPriority|audioLatency|[Uu]nderrun|[Oo]verrun|HB: T=|HB:.*(dio_manager|smartphone_integrator|io-audio|audio_service|mirror-display|maneuver_render|j9)/)
@@ -253,7 +253,7 @@ flat_start_slog() {
         rm -f "${FLAT_PREFIX}_audio.boundary"
         flat_log_event "AUDIO_INDEX_SOURCE_BOUNDARY incomplete_line_terminated=1"
     fi
-    : > "$flat_system"
+    printf '' > "$flat_system"
     flat_system_offset=0
     (exec sloginfo -w -t) >> "$flat_system" 2>&1 & flat_slog_pid=$!
     flat_follow_stop=0
@@ -302,7 +302,7 @@ flat_stop_worker() {
     # Kill only the exact children published by our own worker. No slay/global
     # process-name cleanup, and no unbounded wait on a blocked QNX resource.
     worker_prefix=$1; worker_pid=$2
-    : > "${worker_prefix}_probe.stop"
+    printf '' > "${worker_prefix}_probe.stop"
     if flat_pid_alive "$worker_pid"; then kill -KILL "$worker_pid" 2>/dev/null || true; fi
     for child_file in "$worker_prefix"_probe.child "$worker_prefix"_probe.timer; do
         child_pid=$(cat "$child_file" 2>/dev/null || true)
@@ -540,7 +540,14 @@ while [ -f "$ENABLED" ]; do
             exit 0
         fi
     fi
-    echo "SD_WAIT storage=FLAT_TMP_PLAINTEXT_SD attempt=$storage_wait"
+    # No SD is an idle state, not a reason to fill the shared-memory disk.
+    if [ $((storage_wait % 30)) -eq 0 ]; then
+        boot_entry=$(select_boot_entry_source)
+        boot_size=$(wc -c < "$boot_entry" 2>/dev/null) || boot_size=0
+        case "$boot_size" in ''|*[!0-9]*) boot_size=0 ;; esac
+        if [ "$boot_size" -ge 65536 ]; then (printf '' > "$boot_entry") 2>/dev/null || true; fi
+        echo "SD_WAIT storage=FLAT_TMP_PLAINTEXT_SD attempt=$storage_wait"
+    fi
     storage_wait=$((storage_wait + 1))
     if [ "$ITERATIONS" -gt 0 ] && [ "$storage_wait" -ge "$ITERATIONS" ]; then exit 0; fi
     sleep "$INTERVAL"

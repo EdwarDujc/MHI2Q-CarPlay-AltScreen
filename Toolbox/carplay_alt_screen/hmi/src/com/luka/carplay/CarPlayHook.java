@@ -43,6 +43,50 @@ public class CarPlayHook {
 
     private static volatile Object savedContext = null;
     private static final Object RGI_LOCK = new Object();
+    private static final Object LIFECYCLE_QUEUE = new Object();
+    private static Thread lifecycleWorker;
+    private static Object requestedContext;
+    private static boolean lifecyclePending, requestedActive, cleanupPending;
+
+    /* OEM callbacks only publish intent. Join/flush/service work stays on our
+     * actor; coalescing preserves a disconnect even before an immediate reconnect. */
+    private static void queueLifecycle(Object context, boolean activate) {
+        synchronized (LIFECYCLE_QUEUE) {
+            requestedContext = context;
+            requestedActive = activate;
+            lifecyclePending = true;
+            if (!activate) cleanupPending = true;
+            if (lifecycleWorker == null) {
+                Thread worker = new Thread(new Runnable() {
+                    public void run() {
+                        while (true) {
+                            Object context;
+                            boolean activate, cleanup;
+                            synchronized (LIFECYCLE_QUEUE) {
+                                while (!lifecyclePending) {
+                                    try { LIFECYCLE_QUEUE.wait(); } catch (InterruptedException ignored) { }
+                                }
+                                context = requestedContext;
+                                activate = requestedActive;
+                                cleanup = cleanupPending;
+                                lifecyclePending = cleanupPending = false;
+                            }
+                            try {
+                                synchronized (RGI_LOCK) {
+                                    if (cleanup || !activate) deactivateNow();
+                                    if (activate) activateNow(context);
+                                }
+                            } catch (Throwable t) { Log.e(TAG, "lifecycle worker", t); }
+                        }
+                    }
+                }, "carplay-oem-lifecycle");
+                worker.setDaemon(true);
+                try { worker.start(); lifecycleWorker = worker; }
+                catch (Throwable t) { Log.e(TAG, "lifecycle worker start failed; intent retained", t); }
+            }
+            LIFECYCLE_QUEUE.notifyAll();
+        }
+    }
     private static volatile boolean carplayPresent;
     private static DeviceStateHandler listenerProxy = null;
 
@@ -67,11 +111,11 @@ public class CarPlayHook {
      * Called when CarPlay device activates.
      */
     public static void onActivate(Object context) {
-        synchronized (RGI_LOCK) { activateNow(context); }
+        queueLifecycle(context, true);
     }
 
     private static void activateNow(Object context) {
-        if (active && savedContext != context) onDeactivate();
+        if (active && savedContext != context) deactivateNow();
         ++activationGeneration;
         Log.i(TAG, "onActivate");
         Log.i(TAG, "Build: " + BUILD_ID);
@@ -115,7 +159,7 @@ public class CarPlayHook {
      * Called when CarPlay device deactivates.
      */
     public static void onDeactivate() {
-        synchronized (RGI_LOCK) { deactivateNow(); }
+        queueLifecycle(null, false);
     }
 
     private static void deactivateNow() {
@@ -205,7 +249,7 @@ public class CarPlayHook {
         if (routeGuidance != null) return true;
         routeGuidance = isRgiDisabled() ? null : new RouteGuidance();
         if (routeGuidance != null && !routeGuidance.init(naviService)) {
-            long now = System.currentTimeMillis();
+            long now = com.luka.carplay.framework.ElapsedClock.nowMs();
             if (lastInitFailureLog == 0 || now < lastInitFailureLog || now - lastInitFailureLog >= 10000L) {
                 lastInitFailureLog = now;
                 Log.e(TAG, "RouteGuidance init failed; retry pending");
@@ -319,7 +363,7 @@ public class CarPlayHook {
 
     private static void pollRgiRuntimeNow() {
         com.luka.carplay.core.ScreenNavStatusGate.retryPending();
-        long now = System.currentTimeMillis();
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (active && savedContext != null &&
                 (now < lastServiceProbe || now - lastServiceProbe >= 1000L)) {
             lastServiceProbe = now;

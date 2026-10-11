@@ -109,7 +109,7 @@ if ! ensure_dirs "$SD/logs" "$SD/restore-transaction"; then
   emit_sd_diagnostics
   exit 1
 fi
-if ! (: >> "$LOG") 2>/dev/null; then
+if ! (printf '' >> "$LOG") 2>/dev/null; then
   echo "RESTORE=REFUSED reason=SD_LOG_NOT_WRITABLE production_changed=NO"
   emit_sd_diagnostics
   exit 1
@@ -179,7 +179,7 @@ preflight_startup(){
 
 dir_manifest(){
   src=$1; out=$2
-  if [ ! -d "$src" ]; then : > "$out"; return 0; fi
+  if [ ! -d "$src" ]; then printf '' > "$out"; return 0; fi
   (
     cd "$src" || exit 1
     find . -type f -print 2>/dev/null | sort | while IFS= read -r rel; do

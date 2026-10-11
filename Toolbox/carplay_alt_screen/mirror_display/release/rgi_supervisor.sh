@@ -17,8 +17,12 @@ if [ -d /proc/boot ] && [ -d /mnt/app ]; then
   LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/proc/boot:/usr/lib:/armle/lib:/armle/lib/dll:/lib:/mnt/app/usr/lib:/eso/lib
   export LD_LIBRARY_PATH
 fi
-log() { printf '%s\n' "$*" >> "$LOG"; }
-if ! : >> "$LOG"; then
+log() {
+  log_size=$(wc -c < "$LOG" 2>/dev/null) || log_size=0
+  case "$log_size" in ''|*[!0-9]*) log_size=0 ;; esac
+  if [ "$log_size" -ge 1048576 ]; then printf '' > "$LOG" 2>/dev/null || return 0; fi
+  printf '%s\n' "$*" >> "$LOG"; }
+if ! printf '' >> "$LOG"; then
   echo "RGI_SUPERVISOR=FAIL stage=log_open path=$LOG" >&2
   exit 2
 fi
@@ -86,8 +90,16 @@ while [ ! -f "$PERSISTENT_DISABLED" ] && [ ! -f "$DISABLED" ] && [ ! -f "$STOP" 
   failures=$((failures+1))
   log "RGI_RENDERER_EXIT rc=$rc uptime=$elapsed consecutive=$failures"
   if [ "$failures" -gt "$MAX_RESTARTS" ]; then
-    log "RGI_SUPERVISOR=RESTART_LIMIT action=WAIT_FOR_NEXT_START"
-    break
+    # Screen/graphics may become ready long after early startup. Keep the
+    # kernel lease, then retry slowly instead of abandoning this whole boot.
+    log "RGI_SUPERVISOR=RESTART_LIMIT action=COOLDOWN_RETRY seconds=60"
+    cooldown=0
+    while [ "$cooldown" -lt 60 ] && [ ! -f "$STOP" ] && [ ! -f "$DISABLED" ] && [ ! -f "$PERSISTENT_DISABLED" ]; do
+      sleep 1
+      cooldown=$((cooldown+1))
+    done
+    failures=0
+    continue
   fi
   sleep $((failures*2))
 done

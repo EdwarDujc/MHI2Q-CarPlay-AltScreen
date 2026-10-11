@@ -203,8 +203,8 @@ jar_valid(){
 probe_writable_dir(){
     probe_dir=$1
     [ -d "$probe_dir" ] || return 1
-    probe_file="$probe_dir/.altscreen-start-write.$"
-    if ( : > "$probe_file" ) 2>/dev/null; then
+    probe_file="$probe_dir/.altscreen-start-write.$$"
+    if ( printf '' > "$probe_file" ) 2>/dev/null; then
         rm -f "$probe_file" 2>/dev/null || true
         return 0
     fi
@@ -533,7 +533,7 @@ system_space_snapshot start_after_publish
 
 rm -f "$DEVICE_ROOT/tmp/mmi-rgi.stopped" "$DEVICE_ROOT/tmp/altscreen_mirror.stop.requested" 2>/dev/null || fail "cannot reset display lifecycle"
 if [ -f "$STATE/rgi.disabled" ]; then
-    : > "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot disable RGI lifecycle"
+    printf '' > "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot disable RGI lifecycle"
     echo "INSTALL_RGI_MODE=NO"
 else
     rm -f "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot enable RGI lifecycle"

@@ -316,7 +316,7 @@ if [ -z "$problem" ]; then
         grep -q 'libcarplay_rgi_meta.so' "$SI" 2>/dev/null || problem="RGI preload not set"
         [ -n "$problem" ] || [ ! -e "$RUNTIME/state/rgi.disabled" ] || problem="RGI unexpectedly disabled"
     else
-        ! grep -q 'libcarplay_rgi_meta.so' "$SI" 2>/dev/null || problem="RGI preload present in NO RGI mode"
+        grep -q 'libcarplay_rgi_meta.so' "$SI" 2>/dev/null || problem="cover art preload missing in NO RGI mode"
         [ -n "$problem" ] || [ -f "$RUNTIME/state/rgi.disabled" ] || problem="RGI not disabled"
     fi
 fi

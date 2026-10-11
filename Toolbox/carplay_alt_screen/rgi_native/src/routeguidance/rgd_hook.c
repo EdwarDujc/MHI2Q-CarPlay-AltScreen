@@ -53,6 +53,7 @@ static uint64_t now_monotonic_ms(void) {
  * are tiny (a few stores + a read of monotonic time). */
 static pthread_mutex_t g_rgd_debounce_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_rgd_start_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t request_generation;
 
 /* Forward decl — implemented after rgd_update_t is in scope. */
 void rgd_periodic_tick(void);
@@ -1180,9 +1181,10 @@ static void write_bus_snapshot_from_cache(int extra_slot, const rgd_maneuver_t* 
 }
 
 void rgd_clear_state(const char* reason) {
+    pthread_mutex_lock(&g_rgd_start_lock);
+    ++request_generation;
     g_rgd.active = false;
     g_rgd.sent_5203 = false;
-    pthread_mutex_lock(&g_rgd_start_lock);
     g_rgd.sent_5200 = false;
     g_rgd.got_520x = false;
     g_rgd.component_valid = false;
@@ -1225,6 +1227,8 @@ hook_result_t rgd_request_updates(void) {
     uint64_t now = now_monotonic_ms();
     uint64_t retry_ms;
     unsigned int attempt;
+    uint64_t generation;
+    uint16_t component;
 
     /* Serialize the transport callback and 1 Hz heartbeat.  Claim the retry
      * timestamp before injection so both threads cannot emit the same 0x5200. */
@@ -1245,6 +1249,8 @@ hook_result_t rgd_request_updates(void) {
     }
     g_rgd.last_5200_ms = now;
     attempt = ++g_rgd.start_5200_attempts;
+    generation = request_generation;
+    component = g_rgd.component_id;
     pthread_mutex_unlock(&g_rgd_start_lock);
 
     /*
@@ -1258,7 +1264,7 @@ hook_result_t rgd_request_updates(void) {
     size_t off = 0;
     size_t n = 0;
 
-    n = iap2_build_tlv_u16(tlv + off, sizeof(tlv) - off, RGD_START_TLV_COMPONENT_ID, g_rgd.component_id);
+    n = iap2_build_tlv_u16(tlv + off, sizeof(tlv) - off, RGD_START_TLV_COMPONENT_ID, component);
     if (n == 0) return HOOK_ERR_PARAM;
     off += n;
 
@@ -1277,18 +1283,24 @@ hook_result_t rgd_request_updates(void) {
     hook_result_t res = hook_inject_message(IAP2_MSG_ROUTE_GUIDANCE_START, tlv, off);
     if (res == HOOK_OK) {
         pthread_mutex_lock(&g_rgd_start_lock);
+        if (generation != request_generation || !g_rgd.component_valid || component != g_rgd.component_id) {
+            pthread_mutex_unlock(&g_rgd_start_lock);
+            return HOOK_ERR_INIT;
+        }
         g_rgd.sent_5200 = true;
-        pthread_mutex_unlock(&g_rgd_start_lock);
         g_rgd.active = true;
         rgd_update_session_active();
+        pthread_mutex_unlock(&g_rgd_start_lock);
         LOG_INFO(LOG_MODULE, "Sent 0x5200 attempt=%u (component=0x%04X, opts=source_name+source_supports_rg+exit_info)",
                  attempt, g_rgd.component_id);
     } else {
         /* A transport failure was not a real attempt.  Make the next heartbeat
          * retry immediately instead of waiting for the backoff interval. */
         pthread_mutex_lock(&g_rgd_start_lock);
-        if (g_rgd.start_5200_attempts > 0) --g_rgd.start_5200_attempts;
-        g_rgd.last_5200_ms = 0;
+        if (generation == request_generation) {
+            if (g_rgd.start_5200_attempts > 0) --g_rgd.start_5200_attempts;
+            g_rgd.last_5200_ms = 0;
+        }
         pthread_mutex_unlock(&g_rgd_start_lock);
     }
     return res;

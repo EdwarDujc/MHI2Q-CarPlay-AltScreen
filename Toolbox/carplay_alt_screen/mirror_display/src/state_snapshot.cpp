@@ -97,7 +97,9 @@ StateSnapshotResult write_state_snapshot(const char *path, const char *data,
         stage = "rename";
         error = errno;
     }
-    if (stage && strcmp(stage, "rename") == 0 && error == EXDEV) {
+    if (stage && strcmp(stage, "rename") == 0 &&
+        (error == EXDEV || ((error == ENOSYS || error == EINVAL || error == ENOTSUP) &&
+         (strncmp(path, "/tmp/", 5) == 0 || strncmp(path, "/dev/shmem/", 11) == 0)))) {
         (void)unlink(temporary);
         return write_shared_snapshot(path, data, bytes);
     }

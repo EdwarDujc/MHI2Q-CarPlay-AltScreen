@@ -27,13 +27,14 @@ struct alt_session_lease {
     int retained;
     int completed;
     int deferred;
+    int blocks_lifecycle;
     enum alt_session_operation operation;
 };
 
 int alt_session_guard_enter(void *receiver, enum alt_session_operation operation,
                             struct alt_session_lease *lease);
 void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed);
-int alt_session_guard_defer(struct alt_session_lease *lease);
+int alt_session_guard_defer(struct alt_session_lease *lease, int blocks_lifecycle);
 int alt_session_guard_reserve_retry(const struct alt_session_lease *owner,
                                    struct alt_session_lease *reservation);
 

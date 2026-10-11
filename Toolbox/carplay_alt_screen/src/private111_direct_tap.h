@@ -25,7 +25,7 @@ int p111_frame_tap_write(void *stream, const unsigned char *buffer,
 /*
  * Read-only, process-local decoded-frame progress for control-plane pacing.
  * This does not change the /carplay111_decoded SHM ABI and never touches the
- * renderer. last_publish_us32 is modular microseconds from gettimeofday();
+ * renderer. last_publish_us32 is modular CLOCK_MONOTONIC microseconds;
  * callers only use it for short (< seconds) age checks.
  */
 struct p111_frame_progress_snapshot {
@@ -46,7 +46,7 @@ int p111_frame_tap_get_progress(
  * stock window into a normal pixmap, which lets the platform linearize the
  * vendor 0x0001000c layout before the existing packed-NV12 SHM contract.
  *
- * Returns non-zero when the frame was published, deliberately frame-paced,
+ * Returns non-zero when the frame was published, skipped for capture contention,
  * or a post-success transient failure is handled by freezing the last good
  * auxiliary frame. Returns zero only before the first good auxiliary frame
  * when Screen linearization cannot provide a safe pixel source. Raw vendor

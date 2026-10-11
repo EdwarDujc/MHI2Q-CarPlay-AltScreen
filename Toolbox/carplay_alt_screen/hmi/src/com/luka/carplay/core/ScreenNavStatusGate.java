@@ -68,6 +68,7 @@ public final class ScreenNavStatusGate {
                 if (current != gate) cs.setCombiBAPListenerCombiService(gate);
                 clusterService = cs;
                 seedInstrumentState(cs);
+                seedNativeData(cs);
                 Log.i(TAG, "native route-guidance gate installed/reused");
             }
 
@@ -82,6 +83,33 @@ public final class ScreenNavStatusGate {
     /** Installing after stock updateAll must not wait for another Fct44/54 delta.
      * Read both accepted values on NavigationJobs, without sending synthetic BAP
      * responses. The fields can belong to the stock listener's superclass. */
+    private static void seedNativeData(ClusterService cs) {
+        // Replay the OEM listener's accepted values through its own update methods,
+        // after the gate is attached, on NavigationJobs. Never fabricate BAP data.
+        String[] methods = { "updateRGStatusAndType", "updateActiveRGType",
+            "updateDistanceToNextManeuver", "updateCurrentPositionInfo",
+            "updateManeuverDescriptor", "updateLaneGuidance", "updateExitView",
+            "updateManeuverState", "updateTurnToInfo", "updateDistanceToDestination",
+            "updateTimeToDestination", "updateDestinationInfo" };
+        try {
+            Object listener = cs.getClass().getMethod("getCombiBAPListener", new Class[0])
+                .invoke(cs, new Object[0]);
+            if (listener == null) return;
+            for (int i=0; i<methods.length; i++) {
+                Class type = listener.getClass();
+                java.lang.reflect.Method method = null;
+                while (type != null) {
+                    try { method = type.getDeclaredMethod(methods[i], new Class[0]); break; }
+                    catch (NoSuchMethodException absent) { type = type.getSuperclass(); }
+                }
+                if (method != null) {
+                    try { method.setAccessible(true); method.invoke(listener, new Object[0]); }
+                    catch (Throwable t) { Log.w(TAG, "OEM snapshot seed failed method=" + methods[i] + ": " + t); }
+                }
+            }
+        } catch (Throwable t) { Log.w(TAG, "OEM snapshot accessor unavailable: " + t); }
+    }
+
     private static boolean readListenerBoolean(Object listener, String name) throws Exception {
         Class type = listener.getClass();
         while (type != null) {
@@ -177,9 +205,11 @@ public final class ScreenNavStatusGate {
     /** Resident monitor retries dispatcher/service absence and failed replay,
      * including after the phone disconnects. OEM writes remain on NavigationJobs. */
     public static synchronized void retryPending() {
-        long now = System.currentTimeMillis();
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (now >= lastRetryMs && now - lastRetryMs < 1000L) return;
         lastRetryMs = now;
+        // OEM service identity can change independently of our policy revision.
+        appliedRevision = -1;
         scheduleInstallLocked();
     }
 

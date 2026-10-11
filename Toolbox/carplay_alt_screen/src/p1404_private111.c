@@ -35,9 +35,10 @@ static int pending_begin(void *receiver, const void *descriptor) {
     uint32_t generation;
     if (!receiver || !descriptor) return 0;
 
-    /* Begin first: even a table-full failure conservatively invalidates an older
-     * private SETUP rather than allowing two candidate commits to overlap. */
-    generation = alt_control_fence_begin();
+    /* Only this receiver's older pending SETUP is invalidated. Another
+     * receiver's late disconnect cannot cancel our candidate commit. */
+    generation = alt_control_fence_begin(receiver);
+    if (!generation) return 0;
     pending_lock();
     for (i = 0; i < ALT111_PENDING_SLOTS; ++i) {
         if (!g_pending[i].receiver && free_slot < 0) free_slot = (int)i;
@@ -505,14 +506,14 @@ int alt_private111_finish_setup(void *receiver_session,
     /* Unit fixtures historically call finish_setup directly. Production QNX
      * builds never define this and therefore fail closed if prepare_stock did not
      * register the transaction before the stock call. */
-    if (!generation) generation = alt_control_fence_begin();
+    if (!generation) generation = alt_control_fence_begin(receiver_session);
 #endif
     if (!generation) {
         altscreen_log("ERROR PHASE=STREAM_111_FENCE_COMMIT receiver=%p descriptor=%p missing_generation=1 private_blocked=1 stock110_untouched=1",
                       receiver_session, alt_descriptor);
         return ALT111_FINISH_FAIL_OPEN;
     }
-    if (!alt_control_fence_lock_current(generation)) {
+    if (!alt_control_fence_lock_current(receiver_session, generation)) {
         altscreen_log("WARN PHASE=STREAM_111_FENCE_STALE receiver=%p descriptor=%p generation=%u current=0 private_skipped=1 stock110_untouched=1",
                       receiver_session, alt_descriptor, generation);
         return ALT111_FINISH_FAIL_OPEN;
@@ -522,7 +523,7 @@ int alt_private111_finish_setup(void *receiver_session,
                   receiver_session, alt_descriptor, generation);
     rc = finish_setup_locked(receiver_session, alt_descriptor, stock_rc,
                              stock_response, generation);
-    alt_control_fence_unlock();
+    alt_control_fence_unlock(receiver_session, 0);
     altscreen_log("PHASE=STREAM_111_FENCE_COMMIT_LEAVE receiver=%p generation=%u private_rc=%d serialized=1",
                   receiver_session, generation, rc);
     return rc;
@@ -570,12 +571,16 @@ int alt_private111_teardown_deferred(void *receiver_session, const char *reason,
     /* cancel_and_lock establishes a total order with finish_setup: either an
      * in-flight commit finishes first and is immediately torn down, or teardown
      * wins first and the old SETUP token becomes stale before it can create 111. */
-    generation = alt_control_fence_cancel_and_lock();
+    generation = alt_control_fence_cancel_and_lock(receiver_session);
+    if (!generation) {
+        altscreen_log("WARN PHASE=STREAM_111_FENCE_BUSY receiver=%p cleanup_deferred=1 resources_retained=1", receiver_session);
+        return 0;
+    }
     pending_cancel_receiver(receiver_session);
     altscreen_log("PHASE=STREAM_111_FENCE_CANCEL receiver=%p generation=%u reason=%s serialized=1",
                   receiver_session, generation, reason ? reason : "-");
     ok = teardown_locked(receiver_session, reason, after_stock_cleanup);
-    alt_control_fence_unlock();
+    alt_control_fence_unlock(receiver_session, ok);
     return ok;
 }
 

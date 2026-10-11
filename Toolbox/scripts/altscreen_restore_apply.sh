@@ -108,7 +108,7 @@ strip_blocks(){
 
 # Stop RGI through its resident Java owner before removing its executable.
 rm -f "$DEVICE_ROOT/tmp/mmi-rgi.stopped" 2>/dev/null || true
-: > "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || { echo "FAIL: cannot withdraw RGI"; exit 1; }
+printf '' > "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || { echo "FAIL: cannot withdraw RGI"; exit 1; }
 rgi_wait=0
 while [ ! -f "$DEVICE_ROOT/tmp/mmi-rgi.stopped" ] && [ "$rgi_wait" -lt 5 ]; do
     sleep 1; rgi_wait=$((rgi_wait + 1))
