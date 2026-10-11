@@ -54,6 +54,7 @@ public class CarPlayHook {
     private static IServiceManager naviServiceManager;
     private static ServiceReference naviServiceReference;
     private static Object boundNaviService;
+    private static Object boundNaviUnderlyingService;
     private static Object naviServiceIdentity;
     private static long lastServiceProbe;
     private static long lastInitFailureLog;
@@ -381,11 +382,15 @@ public class CarPlayHook {
                     || (identity == null && sm == naviServiceManager && refs[0] == naviServiceReference)))
                 return boundNaviService;
             Object next = sm.getService(refs[0]);
-            if (next != null && next == boundNaviService) {
+            Object underlying = identity == null && next != null ?
+                probeUnderlyingNaviService(sm, refs[0]) : null;
+            if (next != null && (next == boundNaviService ||
+                    (underlying != null && underlying == boundNaviUnderlyingService))) {
                 /* Wrappers can change while the registered service remains
                  * identical. Balance the probe acquisition, retain our old
                  * manager/reference pair until that binding is retired. */
                 sm.releaseService(refs[0]);
+                if (underlying != null) boundNaviUnderlyingService = underlying;
                 return boundNaviService;
             }
             retireRouteGuidance();
@@ -394,12 +399,37 @@ public class CarPlayHook {
             naviServiceManager = sm;
             naviServiceReference = refs[0];
             boundNaviService = next;
+            boundNaviUnderlyingService = underlying;
             naviServiceIdentity = identity;
             return next;
 
         } catch (Throwable e) {
             Log.d(TAG, "getNaviService: " + e.getMessage());
             return null;
+        }
+    }
+
+    /* Measured Audi ServiceManagerImpl exposes its BundleContext. Its getService
+     * may add a logging wrapper, so compare the underlying registered object
+     * when service.id is absent. Every raw probe is balanced immediately; the
+     * existing manager/reference binding still owns the service used by RGI. */
+    private static Object probeUnderlyingNaviService(IServiceManager sm, ServiceReference reference) {
+        org.osgi.framework.BundleContext context = null;
+        Object service = null;
+        try {
+            Object value = sm.getClass().getMethod("getBundleContext", new Class[0])
+                .invoke(sm, new Object[0]);
+            if (!(value instanceof org.osgi.framework.BundleContext)) return null;
+            context = (org.osgi.framework.BundleContext)value;
+            service = context.getService(reference);
+            return service;
+        } catch (Throwable t) {
+            return null; /* no reliable raw identity: retain the conservative path */
+        } finally {
+            if (context != null && service != null) {
+                try { context.ungetService(reference); }
+                catch (Throwable t) { Log.w(TAG, "raw navigation identity probe release failed: " + t); }
+            }
         }
     }
 
@@ -416,6 +446,7 @@ public class CarPlayHook {
         naviServiceManager = null;
         naviServiceReference = null;
         boundNaviService = null;
+        boundNaviUnderlyingService = null;
         naviServiceIdentity = null;
         if (manager != null && reference != null) {
             try { manager.releaseService(reference); }

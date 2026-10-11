@@ -16,6 +16,7 @@ static struct {
     unsigned depth;
     unsigned teardown_depth;
     unsigned command_depth;
+    unsigned pending_teardown;
     int full_completed;
 } session_guards[ALT_SESSION_GUARD_SLOTS];
 static volatile unsigned session_guards_lock;
@@ -58,6 +59,15 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
             session_guards_release();
             return ALT_SESSION_CLOSED;
         }
+        /* Preserve stop-before-start ordering while a retained background
+         * cleanup waits. A late SETUP must not be destroyed by that old stop. */
+        if (session_guards[slot].pending_teardown &&
+            operation != ALT_SESSION_TEARDOWN &&
+            operation != ALT_SESSION_DEFERRED_TEARDOWN &&
+            operation != ALT_SESSION_STOP_COMMAND) {
+            session_guards_release();
+            return ALT_SESSION_REFUSED;
+        }
         if (!session_guards[slot].owner || session_guards[slot].owner == self) {
             /* Stock SETUP error recovery legitimately calls outer TearDown on
              * its own thread. Allow that nesting, but never destroy resources
@@ -76,7 +86,7 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
             }
             session_guards[slot].owner = self;
             ++session_guards[slot].depth;
-            if (operation == ALT_SESSION_TEARDOWN)
+            if (operation == ALT_SESSION_TEARDOWN || operation == ALT_SESSION_DEFERRED_TEARDOWN)
                 ++session_guards[slot].teardown_depth;
             if (operation == ALT_SESSION_COMMAND || operation == ALT_SESSION_STOP_COMMAND)
                 ++session_guards[slot].command_depth;
@@ -93,15 +103,24 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
         /* A stalled OEM submitter must not pin another lifecycle caller
          * forever. Refusal preserves its resources and reports unfinished;
          * it never permits teardown to overlap a command. */
-        if (lease->waited >= ALT_SESSION_WAIT_POLLS) {
+        if (operation != ALT_SESSION_DEFERRED_TEARDOWN && lease->waited >= ALT_SESSION_WAIT_POLLS) {
             session_guards_release();
             return ALT_SESSION_REFUSED;
         }
         session_guards_release();
         ++lease->waited;
-        usleep(1000u); /* a wait timeout must never permit overlapping teardown */
+        usleep(operation == ALT_SESSION_DEFERRED_TEARDOWN ? 50000u : 1000u);
         session_guards_acquire();
     }
+}
+
+int alt_session_guard_defer(struct alt_session_lease *lease) {
+    if (!lease->registered || lease->entered || lease->deferred) return 0;
+    session_guards_acquire();
+    ++session_guards[lease->slot].pending_teardown;
+    lease->deferred = 1;
+    session_guards_release();
+    return 1;
 }
 
 void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed) {
@@ -109,9 +128,10 @@ void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed
     if (!lease->registered) return;
     slot = lease->slot;
     session_guards_acquire();
+    if (lease->deferred) --session_guards[slot].pending_teardown;
     if (lease->entered) {
         if (full_completed) session_guards[slot].full_completed = 1;
-        if (lease->operation == ALT_SESSION_TEARDOWN)
+        if (lease->operation == ALT_SESSION_TEARDOWN || lease->operation == ALT_SESSION_DEFERRED_TEARDOWN)
             --session_guards[slot].teardown_depth;
         if (lease->operation == ALT_SESSION_COMMAND || lease->operation == ALT_SESSION_STOP_COMMAND)
             --session_guards[slot].command_depth;

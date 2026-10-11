@@ -114,6 +114,7 @@ struct native_slot {
     uint32_t linearizer_aux_drops;
     unsigned long owner_thread;
     int monitor_started;
+    int tap_admitted;
     int stop_ui_submitted;
     int action;
     int action_pending;
@@ -1107,6 +1108,16 @@ static void recovery_lock(void) {
 }
 static void recovery_unlock(void) { __sync_lock_release(&g_recovery_guard); }
 
+/* native_lock is held: detach cannot retire this slot during admission.
+ * stream_begin takes only tap metadata; it performs no readback or stock call. */
+static int native_tap_retry_locked(struct native_slot *slot) {
+    if (!slot || !slot->stream || !slot->processing_live || slot->tap_admitted)
+        return 0;
+    if (!p111_direct_tap_stream_begin(slot->stream)) return 0;
+    slot->tap_admitted = 1;
+    return 1;
+}
+
 void p1404_cockpit_native_processing(void *receiver, void *stream, int live) {
     struct native_slot *slot;
     recovery_lock();
@@ -1229,7 +1240,7 @@ static void *native_monitor_worker(void *arg) {
     uint32_t generation = job ? job->generation : 0;
     uint32_t state_generation = job ? job->state_generation : 0;
     uint64_t now;
-    int visible, pending, live, route_ready, event_kind, send_rc;
+    int visible, pending, live, route_ready, event_kind, send_rc, tap_resumed;
     int desired_view_area = -1, view_area_send_index, zoom_gate, cluster_owned;
     int wheel_generation_current;
     uint32_t view_area_command_seq = 0;
@@ -1331,6 +1342,7 @@ static void *native_monitor_worker(void *arg) {
         live = slot && slot->stream == stream && slot->receiver == receiver &&
                slot->generation == generation &&
                slot->state_generation == state_generation;
+        tap_resumed = live ? native_tap_retry_locked(slot) : 0;
         visible = live ? slot->visible : 0;
         pending = live ? slot->action_pending : 0;
         route_ready = live && slot->ui_event_state == 2 &&
@@ -1425,6 +1437,9 @@ static void *native_monitor_worker(void *arg) {
         }
         native_unlock();
 
+        if (tap_resumed)
+            altscreen_log("PHASE=NATIVE_111_TAP_RESUMED receiver=%p stream=%p generation=%u old_owner_released=1 renegotiation_required=0",
+                          receiver, stream, generation);
         if (!live) break;
 
         wheel_generation_current =
@@ -2271,10 +2286,17 @@ int p1404_cockpit_native_attach(void *receiver, void *stream) {
     altscreen_log("PHASE=NATIVE_111_ATTACH_STAGE receiver=%p stream=%p video_impl=%p renderer_before_start=%p generation=%u state_generation=%u requested_geometry=%ux%u first_config_pending=1",
                   receiver, stream, video_impl, renderer, assigned_generation,
                   state_snap.generation, width, height);
-    if (!p111_direct_tap_stream_begin(stream)) {
-        p1404_cockpit_native_detach(receiver, stream);
-        return 0;
-    }
+    native_lock();
+    slot = find_stream_locked(receiver, stream);
+    if (slot && slot->generation == assigned_generation)
+        slot->tap_admitted = p111_direct_tap_stream_begin(stream);
+    else slot = NULL;
+    native_unlock();
+    if (!slot) return 0;
+    /* Renderer configuration/stock decoding must survive an overlapping old
+     * receiver. Its monitor retries metadata admission after processing starts. */
+    altscreen_log("PHASE=NATIVE_111_TAP_ADMISSION receiver=%p stream=%p generation=%u action=STAGED_RETRY_IF_BUSY stock_start_preserved=1",
+                  receiver, stream, assigned_generation);
     return 1;
 }
 
@@ -2348,6 +2370,8 @@ void p1404_cockpit_native_detach(void *receiver, void *stream) {
         slot->receiver = NULL;
         slot->renderer = NULL;
         slot->window = NULL;
+        slot->processing_live = 0;
+        slot->tap_admitted = 0;
         ++slot->generation;
     }
     native_unlock();

@@ -702,7 +702,9 @@ int p111_direct_tap_stream_begin(void *stream) {
     int allowed;
     if (!stream) return 0;
     tap_lock();
-    allowed = !g_stream || g_stream == stream;
+    /* An admitted stream owns the reservation before its first packet too. */
+    allowed = (!g_stream || g_stream == stream) &&
+              (!g_allowed_stream || g_allowed_stream == stream);
     if (allowed) g_allowed_stream = stream;
     tap_unlock();
     return allowed;

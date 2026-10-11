@@ -189,21 +189,13 @@ int AirPlayReceiverSessionStart(void *session, const void *params) {
  * destroy the receiver clock. Stop our worker at the outer boundary instead.
  * The production backend holds a receiver reference until successful cleanup,
  * so a refused cleanup also survives an HTTP caller releasing its reference. */
-void AirPlayReceiverSessionTearDown(void *session, const void *params,
-                                  int reason, unsigned char *out_done) {
-    struct alt_session_lease lease;
+static void fullchain_teardown_admitted(void *session, const void *params,
+                                  int reason, unsigned char *out_done,
+                                  struct alt_session_lease *lease) {
     struct p1404_pf_lease after_stock_cleanup = {0, 0};
     unsigned scope;
     unsigned char stock_done = 0;
     int full = 0;
-    int admission = fullchain_lifecycle_enter(session, ALT_SESSION_TEARDOWN, &lease);
-    if (admission != ALT_SESSION_ENTERED) {
-        if (out_done) *out_done = (unsigned char)lease.completed;
-        altscreen_log("PHASE=TEARDOWN_DUPLICATE receiver=%p admission=%d done=%d stock_called=0",
-                      session, admission, lease.completed);
-        fullchain_lifecycle_leave(session, &lease, 0);
-        return;
-    }
     scope = fullchain_teardown_scope(params, &full);
     if (scope & TEARDOWN_MAIN) bootstrap_forget(session);
     if (!real_session_teardown) {
@@ -217,7 +209,7 @@ void AirPlayReceiverSessionTearDown(void *session, const void *params,
     if (!real_session_teardown) {
         if (out_done) *out_done = 0;
         altscreen_log("ERROR PHASE=TEARDOWN_OUTER missing_stock=1");
-        fullchain_lifecycle_leave(session, &lease, 0);
+        fullchain_lifecycle_leave(session, lease, 0);
         return;
     }
     /* Always cancel a pending 111 transaction on full/111 teardown, even before
@@ -226,7 +218,7 @@ void AirPlayReceiverSessionTearDown(void *session, const void *params,
         !alt_private111_teardown_deferred(session, "outer_session_teardown", &after_stock_cleanup)) {
         if (out_done) *out_done = 0;
         altscreen_log("ERROR PHASE=TEARDOWN_OUTER receiver=%p private_cleanup_failed=1 stock_not_called=1 receiver_held_by_backend=1", session);
-        fullchain_lifecycle_leave(session, &lease, 0);
+        fullchain_lifecycle_leave(session, lease, 0);
         return;
     }
     real_session_teardown(session, params, reason, &stock_done);
@@ -235,7 +227,26 @@ void AirPlayReceiverSessionTearDown(void *session, const void *params,
     alt_private111_finish_cleanup(&after_stock_cleanup);
     if (out_done) *out_done = stock_done;
     altscreen_log("PHASE=TEARDOWN_OUTER receiver=%p stock_called=1 reason=%d done=%d scope=%u",session,reason,(int)stock_done,scope);
-    fullchain_lifecycle_leave(session, &lease, full && stock_done);
+    fullchain_lifecycle_leave(session, lease, full && stock_done);
+}
+
+#include "p1404_deferred_teardown.h"
+
+void AirPlayReceiverSessionTearDown(void *session, const void *params,
+                                  int reason, unsigned char *out_done) {
+    struct alt_session_lease lease;
+    int admission = fullchain_lifecycle_enter(session, ALT_SESSION_TEARDOWN, &lease);
+    if (admission != ALT_SESSION_ENTERED) {
+        int deferred = admission == ALT_SESSION_REFUSED && lease.waited &&
+            lease.registered && lease.retained &&
+            fullchain_defer_teardown(session, params, reason, &lease);
+        if (out_done) *out_done = (unsigned char)lease.completed;
+        altscreen_log("PHASE=TEARDOWN_DUPLICATE receiver=%p admission=%d done=%d deferred=%d stock_called=0",
+                      session, admission, lease.completed, deferred);
+        fullchain_lifecycle_leave(session, &lease, 0);
+        return;
+    }
+    fullchain_teardown_admitted(session, params, reason, out_done, &lease);
 }
 
 /* CFRetain returns the retained object in r0.  Callers currently ignore the

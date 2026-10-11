@@ -8,7 +8,8 @@ enum alt_session_operation {
     ALT_SESSION_CONTROL,
     ALT_SESSION_TEARDOWN,
     ALT_SESSION_COMMAND,
-    ALT_SESSION_STOP_COMMAND /* lifecycle owner may send stopUI before joining */
+    ALT_SESSION_STOP_COMMAND, /* lifecycle owner may send stopUI before joining */
+    ALT_SESSION_DEFERRED_TEARDOWN /* retained background waiter, no caller stall */
 };
 
 enum alt_session_admission {
@@ -25,11 +26,13 @@ struct alt_session_lease {
     int entered;
     int retained;
     int completed;
+    int deferred;
     enum alt_session_operation operation;
 };
 
 int alt_session_guard_enter(void *receiver, enum alt_session_operation operation,
                             struct alt_session_lease *lease);
 void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed);
+int alt_session_guard_defer(struct alt_session_lease *lease);
 
 #endif
