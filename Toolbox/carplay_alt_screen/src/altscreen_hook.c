@@ -639,13 +639,13 @@ static ssize_t bearer_raw_reserved(int token, int kind, int fd, void *buf,
             g_bearer_raw[token].active && g_bearer_raw[token].fd == fd &&
             !bearer_find_closing_locked(fd) &&
             bearer_close_guard_find_locked(fd) < 0;
+    /* The pin now owns the I/O lifetime. Release the original-fd reservation
+     * before libc can block; close and fd reuse must not wait for this write. */
+    if (token >= 0 && token < BEARER_GUARD_SLOTS)
+        memset(&g_bearer_raw[token], 0, sizeof(g_bearer_raw[token]));
     bearer_tx_unlock();
     if (pin_fd < 0 || !valid) {
         if (pin_fd >= 0) (void)real_close(pin_fd);
-        bearer_tx_lock();
-        if (token >= 0 && token < BEARER_GUARD_SLOTS)
-            memset(&g_bearer_raw[token], 0, sizeof(g_bearer_raw[token]));
-        bearer_tx_unlock();
         if (pin_fd >= 0) bearer_set_error(9);
         return -1;
     }
@@ -659,10 +659,6 @@ static ssize_t bearer_raw_reserved(int token, int kind, int fd, void *buf,
         r = real_write(pin_fd, (const void *)buf, n);
     if (real_errno_ptr) saved_error = *real_errno_ptr();
     (void)real_close(pin_fd);
-    bearer_tx_lock();
-    if (g_bearer_raw[token].active && g_bearer_raw[token].fd == fd)
-        memset(&g_bearer_raw[token], 0, sizeof(g_bearer_raw[token]));
-    bearer_tx_unlock();
     if (real_errno_ptr) *real_errno_ptr() = saved_error;
     return r;
 }

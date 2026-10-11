@@ -9,6 +9,16 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <time.h>
+#if defined(QSHIM_FCNTL_H)
+/* QNX 6.5 SDK: sockaddr len/family bytes, F_SETFD=2, FD_CLOEXEC=1. */
+extern int socket(int, int, int);
+extern int bind(int, const void *, unsigned);
+extern int fcntl(int, int, ...);
+struct pf_sockaddr { uint8_t len, family; uint16_t port; uint8_t addr[4], zero[8]; };
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif
 
 extern void altscreen_log(const char *fmt, ...);
 
@@ -22,6 +32,35 @@ static volatile unsigned g_pf_guard;
  * lifetime; a later open of the same port invalidates an older cleanup lease. */
 static uint32_t g_pf_port_generations[65536];
 static uint32_t g_pf_generation;
+/* Kernel ownership survives thread overlap and vanishes on process exit.
+ * TCP 19803 serializes whole-rule transactions; UDP loopback on the exact
+ * video port reserves cleanup ownership without conflicting with its TCP
+ * listener. No SO_REUSE*, marker file, directory, or shared-memory ABI. */
+static int g_pf_transaction_fd = -1;
+static int g_pf_owner_fds[65536]; /* stored as fd+1, zero means unowned */
+
+static int pf_bind_token(uint16_t port, int datagram) {
+    int fd, saved;
+#if defined(QSHIM_FCNTL_H)
+    struct pf_sockaddr address;
+    fd = socket(2, datagram ? 2 : 1, datagram ? 17 : 6);
+    memset(&address, 0, sizeof(address));
+    address.len = sizeof(address); address.family = 2;
+    address.addr[0] = 127; address.addr[3] = 1;
+    ((unsigned char *)&address.port)[0] = (unsigned char)(port >> 8);
+    ((unsigned char *)&address.port)[1] = (unsigned char)port;
+#else
+    struct sockaddr_in address;
+    fd = socket(AF_INET, datagram ? SOCK_DGRAM : SOCK_STREAM, datagram ? IPPROTO_UDP : IPPROTO_TCP);
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET; address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(0x7f000001u);
+#endif
+    if (fd < 0) return -1;
+    if (fcntl(fd, 2 /* F_SETFD */, 1 /* FD_CLOEXEC */) == 0 &&
+        bind(fd, (const void *)&address, sizeof(address)) == 0) return fd;
+    saved = errno; close(fd); errno = saved; return -1;
+}
 static int g_pending_child = -1; /* guarded; never accumulate timed-out children */
 /* Diagnostics are transaction-local under g_pf_guard. */
 static const char *g_pf_stage;
@@ -42,11 +81,23 @@ static int pf_expired(uint64_t deadline) {
 static int pf_lock(uint64_t deadline) {
     for (;;) {
         if (pf_expired(deadline)) return 0;
-        if (__sync_lock_test_and_set(&g_pf_guard, 1u) == 0u) return 1;
+        if (__sync_lock_test_and_set(&g_pf_guard, 1u) == 0u) {
+            do {
+                g_pf_transaction_fd = pf_bind_token(19803u, 0);
+                if (g_pf_transaction_fd >= 0) return 1;
+                usleep(5000);
+            } while (!pf_expired(deadline));
+            __sync_lock_release(&g_pf_guard);
+            return 0;
+        }
         usleep(5000);
     }
 }
-static void pf_unlock(void) { __sync_lock_release(&g_pf_guard); }
+static void pf_unlock(void) {
+    if (g_pf_transaction_fd >= 0) close(g_pf_transaction_fd);
+    g_pf_transaction_fd = -1;
+    __sync_lock_release(&g_pf_guard);
+}
 
 static int pf_token(const char **cursor, const char *end, const char *word) {
     const char *p = *cursor;
@@ -146,7 +197,10 @@ int p1404_alt111_firewall_rewrite(const char *rules, uint16_t port, int enable,
     return 1;
 }
 
-/* QNX spawnp maps only stdio into the helper. No fork in the multithreaded
+/* QNX spawnp maps stdio and the transaction socket into the helper. If the
+ * receiver dies mid-reload, its helper keeps the lock until it exits, so a
+ * stale snapshot cannot race the next receiver. Port-owner sockets stay CLOEXEC.
+ * No fork in the multithreaded
  * receiver, no shell, and no blocking pipe read/pclose/system in teardown. */
 static const char *pf_program(void) {
 #if defined(QSHIM_SPAWN_H) || defined(__QNXNTO__) || defined(ALT111_PF_QNX_TEST)
@@ -169,9 +223,10 @@ static const char *pf_program(void) {
 static int pf_spawn(const char *program, char *const argv[], int output,
                     int null_fd, int error_fd) {
 #if defined(QSHIM_SPAWN_H) || defined(__QNXNTO__) || defined(ALT111_PF_QNX_TEST)
-    int map[3];
+    int map[4];
     map[0] = null_fd; map[1] = output; map[2] = error_fd;
-    return spawnp(program, 3, map, NULL, argv, NULL);
+    map[3] = g_pf_transaction_fd;
+    return spawnp(program, 4, map, NULL, argv, NULL);
 #else
     /* Host tests exercise the same deadline/locking/rules code. */
     posix_spawn_file_actions_t actions;
@@ -183,6 +238,7 @@ static int pf_spawn(const char *program, char *const argv[], int output,
     rc = posix_spawn_file_actions_adddup2(&actions, null_fd, 0);
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, output, 1);
     if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, error_fd, 2);
+    if (!rc) rc = posix_spawn_file_actions_adddup2(&actions, g_pf_transaction_fd, 3);
     if (!rc) rc = posix_spawnp(&child, program, &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
     if (rc) { errno = rc; return -1; }
@@ -303,7 +359,7 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
     char *argv[] = { "pfctl", "-f", path, NULL };
     FILE *fp = NULL;
     size_t cap;
-    int changed = 0, ok = 0, n, saved, write_ok;
+    int changed = 0, ok = 0, n, saved, write_ok, new_owner = -1;
     uint64_t start, deadline, command_deadline;
     if (!port || (!enable && lease && !lease->generation)) return 0;
     start = pf_now_ms();
@@ -324,10 +380,17 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
         ok = 1;
         goto done;
     }
-    if (lease && enable && g_pf_generation == UINT32_MAX) {
+    if (enable && g_pf_generation == UINT32_MAX) {
         /* Never wrap an ownership identity onto a still-pending lease. */
         errno = EIO;
         goto done;
+    }
+    /* An old process cannot reload/remove a port held by another process.
+     * A same-process reopen reuses the kernel token and advances generation. */
+    if (!g_pf_owner_fds[port]) {
+        g_pf_stage = "port_ownership";
+        new_owner = pf_bind_token(port, 1);
+        if (new_owner < 0) goto done;
     }
     command_deadline = enable ? pf_now_ms() + PF_OPEN_HELPER_MS : deadline;
     if (command_deadline > deadline) command_deadline = deadline;
@@ -391,15 +454,18 @@ done:
     saved = errno;
     if (fp) fclose(fp);
     free(after); free(before);
-    if (lease && enable && ok) {
-        lease->port = port;
-        lease->generation = ++g_pf_generation;
-        g_pf_port_generations[port] = lease->generation;
+    if (enable && ok) {
+        g_pf_port_generations[port] = ++g_pf_generation;
+        if (new_owner >= 0) { g_pf_owner_fds[port] = new_owner + 1; new_owner = -1; }
+        if (lease) { lease->port = port; lease->generation = g_pf_generation; }
     } else if (!enable && (!lease || g_pf_port_generations[port] == lease->generation)) {
         /* A consumed failed cleanup can leave a rule, but cannot own any future
          * connection. A new open will get a fresh identity even if rule exists. */
         g_pf_port_generations[port] = 0;
+        if (g_pf_owner_fds[port]) close(g_pf_owner_fds[port] - 1);
+        g_pf_owner_fds[port] = 0;
     }
+    if (new_owner >= 0) close(new_owner);
     altscreen_log("%s PHASE=ALT111_PF_TRANSACTION port=%u enable=%d result=%s stage=%s command=%s errno=%d wait_status=%d helper=%s elapsed_ms=%llu detail=%.383s",
                   ok ? "INFO" : "ERROR", (unsigned)port, enable,
                   ok ? "OK" : "FAILED", g_pf_stage, g_pf_command, ok ? 0 : saved,

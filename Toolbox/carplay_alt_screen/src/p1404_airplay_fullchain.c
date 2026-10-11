@@ -13,6 +13,10 @@ void altscreen_mark_phone_requested_legacy(void);
 #define altscreen_mark_phone_requested altscreen_mark_phone_requested_legacy
 #define alt_find_stream_descriptor alt_find_stream_descriptor_legacy
 #define AirPlayReceiverSessionPlatformControl AirPlayReceiverSessionPlatformControl_legacy
+#define ALT111_TRACKED_BOOTSTRAP 1
+#include <stdint.h>
+static int bootstrap_command_current(void *, uint32_t);
+static void bootstrap_event_result(void *, uint32_t, int, int, int);
 #include "p1404_airplay.c"
 #include "p1404_lock_wait.h"
 #undef AirPlayReceiverSessionPlatformControl
@@ -60,70 +64,7 @@ static unsigned fullchain_teardown_scope(const void *params, int *out_full) {
     return scope;
 }
 
-static struct { void *receiver; int main_ready, sent, pending; uint32_t token; } bootstrap[8];
-static volatile unsigned bootstrap_guard;
-static uint32_t bootstrap_token;
-
-static void bootstrap_lock(void) {
-    while (__sync_lock_test_and_set(&bootstrap_guard, 1u)) p1404_lock_wait_yield();
-}
-static void bootstrap_forget(void *receiver) {
-    unsigned i;
-    bootstrap_lock();
-    for (i=0;i<8;++i) if (bootstrap[i].receiver==receiver)
-        memset(&bootstrap[i],0,sizeof(bootstrap[i]));
-    __sync_lock_release(&bootstrap_guard);
-}
-static void bootstrap_note(void *receiver, int main_ready) {
-    unsigned i,slot=8;
-    uint32_t token=0;
-    int submit=0, deferred=0, rc;
-    void *event_client=NULL;
-    if (!receiver) return;
-    bootstrap_lock();
-    for (i=0;i<8;++i) {
-        if (bootstrap[i].receiver==receiver) {slot=i;break;}
-        if (!bootstrap[i].receiver && slot==8) slot=i;
-    }
-    if (slot<8) {
-        if (!bootstrap[slot].receiver) {
-            if (bootstrap_token == UINT32_MAX) {
-                __sync_lock_release(&bootstrap_guard);
-                altscreen_log("ERROR PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=bootstrap_identity_exhausted",receiver);
-                return;
-            }
-            bootstrap[slot].token=++bootstrap_token;
-        }
-        bootstrap[slot].receiver=receiver;
-        if (main_ready) bootstrap[slot].main_ready=1;
-        /* Exact stock SendCommand checks receiver+0x2c0. SessionStart creates
-         * it from the accepted event socket. Main SETUP alone is insufficient. */
-        memcpy(&event_client,(const unsigned char *)receiver+0x2c0,sizeof(event_client));
-        if (bootstrap[slot].main_ready && event_client &&
-            !bootstrap[slot].sent && !bootstrap[slot].pending) {
-            bootstrap[slot].pending=1;
-            token=bootstrap[slot].token;
-            submit=1;
-        } else if (bootstrap[slot].main_ready && !event_client) {
-            deferred=1;
-        }
-    }
-    __sync_lock_release(&bootstrap_guard);
-    /* Stock submission may block or synchronously reenter teardown. Reserve
-     * under the metadata lock; submit outside it and validate identity after. */
-    if (slot==8)
-        altscreen_log("ERROR PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=bootstrap_slots_full",receiver);
-    if (deferred)
-        altscreen_log("PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=event_channel_not_started waiting=SessionStart",receiver);
-    if (!submit) return;
-    rc=alt_request_cluster_after_main(receiver);
-    bootstrap_lock();
-    if (bootstrap[slot].receiver==receiver && bootstrap[slot].token==token) {
-        bootstrap[slot].pending=0;
-        bootstrap[slot].sent=(rc==0);
-    }
-    __sync_lock_release(&bootstrap_guard);
-}
+#include "p1404_bootstrap.h"
 
 static int fullchain_lifecycle_enter(void *session,
                                     enum alt_session_operation operation,
@@ -189,7 +130,9 @@ int AirPlayReceiverSessionStart(void *session, const void *params) {
  * destroy the receiver clock. Stop our worker at the outer boundary instead.
  * The production backend holds a receiver reference until successful cleanup,
  * so a refused cleanup also survives an HTTP caller releasing its reference. */
-static void fullchain_teardown_admitted(void *session, const void *params,
+static int fullchain_defer_teardown(void *, const void *, int, struct alt_session_lease *);
+static void fullchain_retry_cleanup(void *, const void *, int, struct alt_session_lease *);
+static int fullchain_teardown_admitted(void *session, const void *params,
                                   int reason, unsigned char *out_done,
                                   struct alt_session_lease *lease) {
     struct p1404_pf_lease after_stock_cleanup = {0, 0};
@@ -210,7 +153,7 @@ static void fullchain_teardown_admitted(void *session, const void *params,
         if (out_done) *out_done = 0;
         altscreen_log("ERROR PHASE=TEARDOWN_OUTER missing_stock=1");
         fullchain_lifecycle_leave(session, lease, 0);
-        return;
+        return 0;
     }
     /* Always cancel a pending 111 transaction on full/111 teardown, even before
      * it has installed a state mapping. Audio/Main-only changes preserve it. */
@@ -218,8 +161,10 @@ static void fullchain_teardown_admitted(void *session, const void *params,
         !alt_private111_teardown_deferred(session, "outer_session_teardown", &after_stock_cleanup)) {
         if (out_done) *out_done = 0;
         altscreen_log("ERROR PHASE=TEARDOWN_OUTER receiver=%p private_cleanup_failed=1 stock_not_called=1 receiver_held_by_backend=1", session);
+        if (lease->operation != ALT_SESSION_DEFERRED_TEARDOWN)
+            fullchain_retry_cleanup(session, params, reason, lease);
         fullchain_lifecycle_leave(session, lease, 0);
-        return;
+        return 0;
     }
     real_session_teardown(session, params, reason, &stock_done);
     /* The worker no longer references stock clocks. Stop stock audio before
@@ -228,6 +173,7 @@ static void fullchain_teardown_admitted(void *session, const void *params,
     if (out_done) *out_done = stock_done;
     altscreen_log("PHASE=TEARDOWN_OUTER receiver=%p stock_called=1 reason=%d done=%d scope=%u",session,reason,(int)stock_done,scope);
     fullchain_lifecycle_leave(session, lease, full && stock_done);
+    return 1;
 }
 
 #include "p1404_deferred_teardown.h"
@@ -237,7 +183,7 @@ void AirPlayReceiverSessionTearDown(void *session, const void *params,
     struct alt_session_lease lease;
     int admission = fullchain_lifecycle_enter(session, ALT_SESSION_TEARDOWN, &lease);
     if (admission != ALT_SESSION_ENTERED) {
-        int deferred = admission == ALT_SESSION_REFUSED && lease.waited &&
+        int deferred = admission == ALT_SESSION_REFUSED &&
             lease.registered && lease.retained &&
             fullchain_defer_teardown(session, params, reason, &lease);
         if (out_done) *out_done = (unsigned char)lease.completed;

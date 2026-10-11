@@ -123,6 +123,21 @@ int alt_session_guard_defer(struct alt_session_lease *lease) {
     return 1;
 }
 
+/* Keep identity alive while an admitted teardown transfers a retry to a
+ * background job. The reservation never owns the caller's execution lease. */
+int alt_session_guard_reserve_retry(const struct alt_session_lease *owner,
+                                   struct alt_session_lease *reservation) {
+    if (!owner->registered || !owner->entered) return 0;
+    memset(reservation, 0, sizeof(*reservation));
+    session_guards_acquire();
+    ++session_guards[owner->slot].users;
+    reservation->registered = 1;
+    reservation->slot = owner->slot;
+    reservation->operation = ALT_SESSION_DEFERRED_TEARDOWN;
+    session_guards_release();
+    return 1;
+}
+
 void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed) {
     unsigned slot;
     if (!lease->registered) return;

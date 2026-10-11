@@ -1012,6 +1012,11 @@ static void alt111_event_response(int status, void *response, void *opaque) {
                                           ctx->generation, ctx->event_kind,
                                           status, response != NULL);
     }
+#ifdef ALT111_TRACKED_BOOTSTRAP
+    else if (ctx->event_seq)
+        bootstrap_event_result(ctx->receiver, ctx->event_seq, ctx->event_kind,
+                               status, response != NULL);
+#endif
     alt111_event_context_release(ctx);
 }
 
@@ -1030,7 +1035,13 @@ static int guarded_command_submit(airplay_send_command_fn submit,
         if (!ctx || !ctx->stream || !ctx->generation ||
             ctx->event_kind == ALT111_EVENT_STOP_UI ||
             p1404_cockpit_native_command_current(receiver, ctx->stream, ctx->generation))
-            rc = submit(receiver, command, alt111_event_response, ctx);
+        {
+#ifdef ALT111_TRACKED_BOOTSTRAP
+            if (!ctx || ctx->stream || !ctx->event_seq ||
+                bootstrap_command_current(receiver, ctx->event_seq))
+#endif
+                rc = submit(receiver, command, alt111_event_response, ctx);
+        }
     }
     alt_session_guard_leave(&lease, 0);
     return rc;
@@ -1284,16 +1295,19 @@ done:
 /* LIVI requests the Alt UUID when Main110 becomes ready, before the phone has
  * necessarily requested type111. This request has no private stream yet and
  * must not publish renderer/visibility success from its callback. */
-int alt_request_cluster_after_main(void *receiver) {
+static int alt_request_cluster_after_main_tracked(void *receiver, uint32_t seq) {
     int show_rc = alt_send_cluster_event_impl(receiver, NULL, 0,
-                                             ALT111_EVENT_SHOW_UI, 1, 0);
+                                             ALT111_EVENT_SHOW_UI, 1, seq);
     int key_rc = -1;
     if (show_rc == 0)
         key_rc = alt_send_cluster_event_impl(receiver, NULL, 0,
-                                             ALT111_EVENT_FORCE_KEYFRAME, 1, 0);
+                                             ALT111_EVENT_FORCE_KEYFRAME, 1, seq);
     altscreen_log("PHASE=ALT111_REQUEST_AFTER_MAIN receiver=%p show_rc=%d keyframe_rc=%d private_stream_required=0",
                   receiver, show_rc, key_rc);
     return show_rc ? show_rc : key_rc;
+}
+int alt_request_cluster_after_main(void *receiver) {
+    return alt_request_cluster_after_main_tracked(receiver, 0);
 }
 
 static int ensure_display_view_area(cf_obj display, unsigned index) {
