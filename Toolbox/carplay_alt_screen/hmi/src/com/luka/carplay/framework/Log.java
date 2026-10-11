@@ -26,10 +26,10 @@ public final class Log {
      * connect without a reboot.  /tmp is cleared by a reboot; /mnt/app survives it. */
     private static final String VERBOSE_MARKERS =
         "/mnt/app/carplay_verbose:/tmp/carplay_verbose";
-    private static int level = I;
+    private static volatile int level = resolveLevel();
 
     /** Re-read the markers; called at each CarPlay session start. */
-    public static void refreshLevel() { level = I; }
+    public static void refreshLevel() { level = resolveLevel(); }
 
     private static int resolveLevel() {
         try {

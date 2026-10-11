@@ -97,6 +97,8 @@ static void fullchain_lifecycle_leave(void *session,
     if (retained) alt_airplay_release_object(session);
 }
 
+#include "p1404_deferred_streams.h"
+
 static int fullchain_session_start(void *session, const void *params) {
     int rc;
     if (!real_session_start && p1404_direct_stock_symbol_named)
@@ -136,6 +138,7 @@ static int fullchain_teardown_admitted(void *session, const void *params,
                                   int reason, unsigned char *out_done,
                                   struct alt_session_lease *lease) {
     struct p1404_pf_lease after_stock_cleanup = {0, 0};
+    void *audio_owned = NULL;
     unsigned scope;
     unsigned char stock_done = 0;
     int full = 0;
@@ -155,6 +158,23 @@ static int fullchain_teardown_admitted(void *session, const void *params,
         fullchain_lifecycle_leave(session, lease, 0);
         return 0;
     }
+    /* Even a synchronous waiter can be overtaken by SETUP. Its snapshot is
+     * taken at guard registration, before waiting, not at worker creation. */
+    if (!full && !scope) {
+        uint32_t epochs[256];
+        if (fullchain_audio_snapshot(params, lease, epochs)) {
+            const void *request = params;
+            int filter = fullchain_audio_filter(params, lease, epochs, &request, &audio_owned);
+            if (filter != 1) {
+                if (out_done) *out_done = 0;
+                if (!filter && lease->operation != ALT_SESSION_DEFERRED_TEARDOWN)
+                    fullchain_retry_cleanup(session, params, reason, lease);
+                fullchain_lifecycle_leave(session, lease, 0);
+                return filter == 2;
+            }
+            params = request;
+        }
+    }
     /* Always cancel a pending 111 transaction on full/111 teardown, even before
      * it has installed a state mapping. Audio/Main-only changes preserve it. */
     if ((scope & TEARDOWN_ALT) &&
@@ -167,6 +187,7 @@ static int fullchain_teardown_admitted(void *session, const void *params,
         return 0;
     }
     real_session_teardown(session, params, reason, &stock_done);
+    if (audio_owned) alt_airplay_release_object(audio_owned);
     /* The worker no longer references stock clocks. Stop stock audio before
      * waiting on ancillary PF helpers, retaining lifecycle serialization. */
     alt_private111_finish_cleanup(&after_stock_cleanup);
@@ -501,8 +522,7 @@ static int fullchain_stop_server(void *session, unsigned flags, void *command,
         return admission == ALT_SESSION_CLOSED ? 0 : -1;
     }
     bootstrap_forget(session);
-    if (alt_state_lookup_any(session) &&
-        !alt_private111_teardown_deferred(session, "stopServer", &after_stock_cleanup)) {
+    if (!alt_private111_teardown_deferred(session, "stopServer", &after_stock_cleanup)) {
         altscreen_log("ERROR PHASE=TEARDOWN_PRIVATE_BARRIER session=%p command=stopServer callback_refused=1 stock_caller_may_ignore_status=1",
                       session);
         fullchain_lifecycle_leave(session, &lease, 0);
@@ -788,6 +808,7 @@ int AirPlayReceiverSessionSetup(void *session, const void *params, void **out_pa
         fullchain_lifecycle_leave(session, &lease, 0);
         return -6752;
     }
+    fullchain_note_setup_epochs(params, &lease);
     rc = fullchain_session_setup(session, params, out_params);
     fullchain_lifecycle_leave(session, &lease, 0);
     return rc;

@@ -18,6 +18,7 @@ static struct {
     unsigned teardown_depth;
     unsigned command_depth;
     unsigned pending_teardown;
+    uint32_t stream_setup_epochs[256];
     int full_completed;
 } session_guards[ALT_SESSION_GUARD_SLOTS];
 static volatile unsigned session_guards_lock;
@@ -32,6 +33,19 @@ static void session_guards_release(void) {
     __sync_lock_release(&session_guards_lock);
 }
 
+int alt_session_guard_copy_stream_epochs(const struct alt_session_lease *lease, uint32_t out[256]) {
+    if (!lease->registered) return 0;
+    session_guards_acquire();
+    memcpy(out, session_guards[lease->slot].stream_setup_epochs, 256 * sizeof(uint32_t));
+    session_guards_release();
+    return 1;
+}
+void alt_session_guard_note_stream_setup(const struct alt_session_lease *lease, unsigned type) {
+    if (!lease->entered || !lease->registered || type >= 256) return;
+    session_guards_acquire();
+    if (!++session_guards[lease->slot].stream_setup_epochs[type]) ++session_guards[lease->slot].stream_setup_epochs[type];
+    session_guards_release();
+}
 int alt_session_guard_enter(void *receiver, enum alt_session_operation operation,
                             struct alt_session_lease *lease) {
     unsigned i, slot = ALT_SESSION_GUARD_SLOTS;
@@ -53,6 +67,7 @@ int alt_session_guard_enter(void *receiver, enum alt_session_operation operation
     ++session_guards[slot].users; /* includes waiters, so their slot cannot vanish */
     lease->slot = slot;
     lease->registered = 1;
+    memcpy(lease->entry_stream_epochs, session_guards[slot].stream_setup_epochs, sizeof(lease->entry_stream_epochs));
 
     for (;;) {
         if (session_guards[slot].full_completed) {
@@ -137,6 +152,7 @@ int alt_session_guard_reserve_retry(const struct alt_session_lease *owner,
     reservation->registered = 1;
     reservation->slot = owner->slot;
     reservation->operation = ALT_SESSION_DEFERRED_TEARDOWN;
+    memcpy(reservation->entry_stream_epochs, owner->entry_stream_epochs, sizeof(reservation->entry_stream_epochs));
     session_guards_release();
     return 1;
 }

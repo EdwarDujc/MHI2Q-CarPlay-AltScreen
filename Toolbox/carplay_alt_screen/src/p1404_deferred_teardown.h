@@ -11,6 +11,8 @@ struct fullchain_deferred_teardown {
     int reason, full;
     volatile int ready;
     struct alt_session_lease fence;
+    int audio_epochs_valid;
+    uint32_t audio_epochs[256];
 };
 static struct fullchain_deferred_teardown deferred_teardowns[ALT_DEFERRED_TEARDOWN_SLOTS];
 static volatile unsigned deferred_teardown_lock;
@@ -32,8 +34,17 @@ static void *fullchain_deferred_teardown_worker(void *arg) {
     __sync_synchronize();
     do {
         admission = fullchain_lifecycle_enter(job->receiver, ALT_SESSION_DEFERRED_TEARDOWN, &lease);
-        if (admission == ALT_SESSION_ENTERED)
-            finished = fullchain_teardown_admitted(job->receiver, job->params, job->reason, &done, &lease);
+        if (admission == ALT_SESSION_ENTERED) {
+            const void *request = job->params;
+            void *owned = NULL;
+            int filter = job->audio_epochs_valid ? fullchain_audio_filter(job->params, &lease, job->audio_epochs, &request, &owned) : 1;
+            if (filter == 1) finished = fullchain_teardown_admitted(job->receiver, request, job->reason, &done, &lease);
+            else {
+                finished = filter == 2;
+                fullchain_lifecycle_leave(job->receiver, &lease, 0);
+            }
+            if (owned) alt_airplay_release_object(owned);
+        }
         else {
             done = (unsigned char)lease.completed;
             finished = lease.completed;
@@ -99,7 +110,10 @@ static int fullchain_defer_teardown(void *receiver, const void *params, int reas
         deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
         return 0;
     }
-    if (!alt_session_guard_defer(fence, full || (scope & (TEARDOWN_MAIN | TEARDOWN_ALT)))) {
+    if (!full && !scope) job->audio_epochs_valid = fullchain_audio_snapshot(params, fence, job->audio_epochs);
+    /* Unknown stream schemas remain serialized rather than allowing a delayed
+     * teardown whose target cannot be distinguished from a replacement. */
+    if (!alt_session_guard_defer(fence, full || (scope & (TEARDOWN_MAIN | TEARDOWN_ALT)) || !job->audio_epochs_valid)) {
         if (params) alt_airplay_release_object((void *)params);
         deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
         return 0;

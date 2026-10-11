@@ -114,10 +114,13 @@ while [ ! -f "$DEVICE_ROOT/tmp/mmi-rgi.stopped" ] && [ "$rgi_wait" -lt 5 ]; do
     sleep 1; rgi_wait=$((rgi_wait + 1))
 done
 # Withdraw the supervisor before its runtime is removed, preventing respawn.
-[ ! -x "$MIRROR_STOP" ] || /bin/sh "$MIRROR_STOP" >/dev/null 2>&1 || true
+if [ -x "$MIRROR_STOP" ]; then
+    ALT111_MIRROR_TMP_ROOT="$DEVICE_ROOT/tmp" /bin/sh "$MIRROR_STOP" || {
+        echo "FAIL: runtime stop incomplete; retaining installed files for safe retry"
+        exit 1
+    }
+fi
 [ "${ALTSCREEN_CHAIN_TESTING:-0}" = 1 ] || slay maneuver_render >/dev/null 2>&1 || true
-# Stop the pixel sidecar first. It has no context writer in this branch.
-[ ! -x "$MIRROR_STOP" ] || /bin/sh "$MIRROR_STOP" >/dev/null 2>&1 || true
 # Release demand while the current Java controller is still resident. It will
 # observe active/ready withdrawal and return terminal1 to its stock context.
 rm -f "$ACTIVE" "$READY" 2>/dev/null || true

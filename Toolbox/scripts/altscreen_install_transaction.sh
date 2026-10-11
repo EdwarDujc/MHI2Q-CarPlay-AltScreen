@@ -450,6 +450,10 @@ verify_installed(){
     { log "INSTALL_VERIFY=FAIL reason=MIRROR_BINARY_MISSING"; return 1; }
   [ -x "$RUNTIME/bin/mirror/start_vehicle.sh" ] ||
     { log "INSTALL_VERIFY=FAIL reason=MIRROR_START_MISSING"; return 1; }
+  for mirror_file in carplay-alt111-mirror-display start_vehicle.sh stop_vehicle.sh stream_supervisor.sh rgi_supervisor.sh BUILD_INFO.txt SHA256SUMS LICENSE.MMI-MIRROR; do
+    same "$VOLUME/Toolbox/carplay_alt_screen/mirror_display/release/$mirror_file" "$RUNTIME/bin/mirror/$mirror_file" ||
+      { log "INSTALL_VERIFY=FAIL reason=MIRROR_RUNTIME_MISMATCH file=$mirror_file"; return 1; }
+  done
   same "$VOLUME/Toolbox/carplay_alt_screen/mirror_display/release/rgi_supervisor.sh" "$RUNTIME/bin/mirror/rgi_supervisor.sh" ||
     { log "INSTALL_VERIFY=FAIL reason=RGI_SUPERVISOR_MISMATCH"; return 1; }
   [ -x "$RUNTIME/bin/mirror/rgi_supervisor.sh" ] ||

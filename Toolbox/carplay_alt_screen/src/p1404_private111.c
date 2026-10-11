@@ -580,7 +580,8 @@ int alt_private111_teardown_deferred(void *receiver_session, const char *reason,
     altscreen_log("PHASE=STREAM_111_FENCE_CANCEL receiver=%p generation=%u reason=%s serialized=1",
                   receiver_session, generation, reason ? reason : "-");
     ok = teardown_locked(receiver_session, reason, after_stock_cleanup);
-    alt_control_fence_unlock(receiver_session, ok);
+    if (generation != ALT_CONTROL_FENCE_UNTRACKED)
+        alt_control_fence_unlock(receiver_session, ok);
     return ok;
 }
 

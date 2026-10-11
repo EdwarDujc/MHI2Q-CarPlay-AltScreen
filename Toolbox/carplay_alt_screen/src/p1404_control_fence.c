@@ -23,7 +23,7 @@ static unsigned find_locked(void *receiver, int create) {
     return create ? available : FENCE_SLOTS;
 }
 static uint32_t token_locked(void) {
-    if (!++next_token) ++next_token;
+    if (!++next_token || next_token == ALT_CONTROL_FENCE_UNTRACKED) next_token = 1u;
     return next_token;
 }
 uint32_t alt_control_fence_begin(void *receiver) {
@@ -52,8 +52,10 @@ static uint32_t acquire(void *receiver, uint32_t generation, int cancel) {
     unsigned i, polls = 0;
     uint32_t token = 0;
     lock_metadata();
-    i = find_locked(receiver, cancel);
-    if (i == FENCE_SLOTS) { unlock_metadata(); return 0; }
+    i = find_locked(receiver, 0);
+    /* An OEM-only receiver has nothing to cancel. Teardown must not allocate
+     * a private slot or be refused because unrelated slots are occupied. */
+    if (i == FENCE_SLOTS) { unlock_metadata(); return cancel ? ALT_CONTROL_FENCE_UNTRACKED : 0; }
     ++fences[i].waiters;
     while (fences[i].busy && polls < ALT_CONTROL_FENCE_WAIT_POLLS) {
         unlock_metadata();

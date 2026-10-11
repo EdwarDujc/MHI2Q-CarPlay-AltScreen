@@ -43,7 +43,45 @@ public final class WheelZoomBridge {
 
     private WheelZoomBridge() {}
 
-    public static synchronized void onMagnificationChanged(int magnification) {
+    private static final Object INPUT_LOCK = new Object();
+    private static final int[] inputValues = new int[64];
+    private static final boolean[] inputOwned = new boolean[64];
+    private static int inputHead, inputCount, inputGeneration;
+    private static int lastObservedMagnification;
+    private static boolean haveObservedMagnification;
+    private static Thread inputWorker;
+
+    public static void onMagnificationChanged(int magnification) {
+        boolean owned = ClusterStateController.isClusterOwned();
+        synchronized (INPUT_LOCK) {
+            lastObservedMagnification = magnification;
+            haveObservedMagnification = true;
+            if (inputCount == inputValues.length) { inputHead = (inputHead + 1) % inputValues.length; --inputCount; }
+            int index = (inputHead + inputCount) % inputValues.length;
+            inputValues[index] = magnification; inputOwned[index] = owned; ++inputCount;
+            if (inputWorker == null || !inputWorker.isAlive()) {
+                Thread worker = new Thread(new Runnable() { public void run() { inputLoop(); } }, "carplay-wheel-publisher");
+                worker.setDaemon(true);
+                try { worker.start(); inputWorker = worker; } catch (Throwable ignored) { inputWorker = null; }
+            }
+            INPUT_LOCK.notifyAll();
+        }
+    }
+    private static void inputLoop() {
+        while (true) {
+            int value, generation; boolean owned;
+            synchronized (INPUT_LOCK) {
+                while (inputCount == 0) { try { INPUT_LOCK.wait(); } catch (InterruptedException ignored) { } }
+                value = inputValues[inputHead]; owned = inputOwned[inputHead]; generation = inputGeneration;
+                inputHead = (inputHead + 1) % inputValues.length; --inputCount;
+            }
+            synchronized (WheelZoomBridge.class) {
+                synchronized (INPUT_LOCK) { if (generation != inputGeneration) continue; }
+                try { consumeMagnification(value, owned); } catch (Throwable ignored) { }
+            }
+        }
+    }
+    private static void consumeMagnification(int magnification, boolean ownedAtCallback) {
         ++callbackCount;
         /*
          * Raw callback marker: this is the first business action after the
@@ -71,7 +109,7 @@ public final class WheelZoomBridge {
         lastMagnification = magnification;
         if (delta == 0) return;
 
-        if (!ClusterStateController.isClusterOwned()) {
+        if (!ownedAtCallback || !ClusterStateController.isClusterOwned()) {
             ++ignoredNotOwnedCount;
             diag("WHEEL_ZOOM_INPUT magnification=" + magnification
                 + " delta=" + delta
@@ -154,6 +192,10 @@ public final class WheelZoomBridge {
     }
 
     public static synchronized void reset() {
+        synchronized (INPUT_LOCK) {
+            ++inputGeneration; inputHead = inputCount = 0;
+            if (haveObservedMagnification) { lastMagnification = lastObservedMagnification; haveMagnification = true; }
+        }
         // Keep the last OEM absolute value as the next session's baseline.
         // Only a JVM with no OEM callback needs to consume a seed callback.
         try { new File(EVENT_FILE).delete(); } catch (Throwable ignored) {}

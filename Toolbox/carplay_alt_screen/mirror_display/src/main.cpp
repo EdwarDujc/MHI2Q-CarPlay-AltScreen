@@ -820,6 +820,7 @@ int main(int argc, char **argv) {
             "source=/carplay111_decoded window58_readback=0\n");
 
     while (!g_stop) {
+        bound_private_output();
         if (source.read_frame(&frame)) {
             const uint32_t writer = source.writer_pid();
             const uint32_t gen = source.generation();

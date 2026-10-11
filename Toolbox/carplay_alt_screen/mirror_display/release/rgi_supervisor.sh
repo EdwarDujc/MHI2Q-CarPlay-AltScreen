@@ -14,14 +14,17 @@ PERSISTENT_DISABLED=$HERE/../../state/rgi.disabled
 STOP=$TMP_ROOT/altscreen_mirror.stop.requested
 MAX_RESTARTS=${RGI_MAX_RESTARTS:-3}
 if [ -d /proc/boot ] && [ -d /mnt/app ]; then
-  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/proc/boot:/usr/lib:/armle/lib:/armle/lib/dll:/lib:/mnt/app/usr/lib:/eso/lib
+  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/proc/boot:/usr/lib:/armle/lib:/armle/lib/dll:/lib:/mnt/app/root/carplay-altscreen/lib:/eso/lib:/mnt/app/usr/lib:/mnt/app/armle/lib:/mnt/app/armle/lib/dll:/mnt/app/armle/usr/lib:/lib/dll
   export LD_LIBRARY_PATH
 fi
 log() {
+  log_message=$*
   log_size=$(wc -c < "$LOG" 2>/dev/null) || log_size=0
+  set -- $log_size
+  log_size=${1:-0}
   case "$log_size" in ''|*[!0-9]*) log_size=0 ;; esac
   if [ "$log_size" -ge 1048576 ]; then printf '' > "$LOG" 2>/dev/null || return 0; fi
-  printf '%s\n' "$*" >> "$LOG"; }
+  printf '%s\n' "$log_message" >> "$LOG"; }
 if ! printf '' >> "$LOG"; then
   echo "RGI_SUPERVISOR=FAIL stage=log_open path=$LOG" >&2
   exit 2

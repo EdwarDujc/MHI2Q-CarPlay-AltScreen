@@ -1,6 +1,7 @@
 /* Serialize receiver lifecycle operations without assuming a QNX mutex ABI. */
 #ifndef P1404_SESSION_GUARD_H
 #define P1404_SESSION_GUARD_H
+#include <stdint.h>
 
 enum alt_session_operation {
     ALT_SESSION_SETUP,
@@ -29,8 +30,11 @@ struct alt_session_lease {
     int deferred;
     int blocks_lifecycle;
     enum alt_session_operation operation;
+    uint32_t entry_stream_epochs[256]; /* immutable ordering point, before waiting */
 };
 
+int alt_session_guard_copy_stream_epochs(const struct alt_session_lease *, uint32_t out[256]);
+void alt_session_guard_note_stream_setup(const struct alt_session_lease *, unsigned type);
 int alt_session_guard_enter(void *receiver, enum alt_session_operation operation,
                             struct alt_session_lease *lease);
 void alt_session_guard_leave(struct alt_session_lease *lease, int full_completed);

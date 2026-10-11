@@ -25,6 +25,7 @@ public final class ScreenNavStatusGate {
     private static int policyRevision;
     private static int appliedRevision = -1;
     private static long lastRetryMs;
+    private static final boolean[] missingSeedLogged = new boolean[12];
 
     private ScreenNavStatusGate() { }
 
@@ -101,6 +102,10 @@ public final class ScreenNavStatusGate {
                 while (type != null) {
                     try { method = type.getDeclaredMethod(methods[i], new Class[0]); break; }
                     catch (NoSuchMethodException absent) { type = type.getSuperclass(); }
+                }
+                if (method == null && !missingSeedLogged[i]) {
+                    missingSeedLogged[i] = true;
+                    Log.w(TAG, "OEM snapshot method unavailable class=" + listener.getClass().getName() + " method=" + methods[i]);
                 }
                 if (method != null) {
                     try { method.setAccessible(true); method.invoke(listener, new Object[0]); }
@@ -204,7 +209,10 @@ public final class ScreenNavStatusGate {
 
     /** Resident monitor retries dispatcher/service absence and failed replay,
      * including after the phone disconnects. OEM writes remain on NavigationJobs. */
-    public static synchronized void retryPending() {
+    public static synchronized void retryPending() { retryPending(true); }
+    public static synchronized void retryPending(boolean monitorServices) {
+        if (!monitorServices && !desiredRouteBlocked && !desiredCurrentPositionBlocked
+                && (gate == null || (appliedRevision == policyRevision && !gate.hasPendingReplay()))) return;
         long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (now >= lastRetryMs && now - lastRetryMs < 1000L) return;
         lastRetryMs = now;

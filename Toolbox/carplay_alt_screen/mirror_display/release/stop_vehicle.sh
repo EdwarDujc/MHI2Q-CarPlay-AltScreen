@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # QNX /tmp can be a process-manager link to /dev/shmem. That namespace
 # supports flat files, but neither mkdir nor atomic rename. Use the boot-local
 # QNX4 ramdisk for directory locks and atomically replaced metadata. Never fall
@@ -27,20 +29,40 @@ STOP_GUARD="$TMP_ROOT/altscreen_mirror.stop.requested"
 RECOVERY_DIR=$(alts_posix_tmp_dir "$TMP_ROOT")
 RECOVERY_LOCK="$RECOVERY_DIR/altscreen_mirror.recovery.lock"
 
+STOP_INCOMPLETE=0
 stop_pidfile() {
   pf=$1
   wait_limit=$2
   [ -f "$pf" ] || return 0
   pid="$(cat "$pf" 2>/dev/null || true)"
   case "$pid" in ''|*[!0-9]*|0|1) rm -f "$pf" 2>/dev/null || true; return 0 ;; esac
-  if kill -0 "$pid" 2>/dev/null && owned_pid "$pid" "$pf"; then
+  if kill -0 "$pid" 2>/dev/null; then
+    owned_result=0
+    owned_pid "$pid" "$pf" || owned_result=$?
+    if [ "$owned_result" = 2 ]; then
+      echo "STOP_PIDFILE=UNVERIFIED pid=$pid file=$pf pidfile=RETAINED" >&2
+      STOP_INCOMPLETE=1
+      return 0
+    fi
+    if [ "$owned_result" != 0 ]; then rm -f "$pf" 2>/dev/null || true; return 0; fi
     kill -TERM "$pid" 2>/dev/null || true
     n=0
     while kill -0 "$pid" 2>/dev/null && [ "$n" -lt "$wait_limit" ]; do
       sleep 1
       n=$((n + 1))
     done
-    if kill -0 "$pid" 2>/dev/null && owned_pid "$pid" "$pf"; then kill -KILL "$pid" 2>/dev/null || true; fi
+    if kill -0 "$pid" 2>/dev/null; then
+      owned_result=0; owned_pid "$pid" "$pf" || owned_result=$?
+      if [ "$owned_result" = 2 ]; then
+        echo "STOP_PIDFILE=UNVERIFIED pid=$pid file=$pf pidfile=RETAINED" >&2
+        STOP_INCOMPLETE=1; return 0
+      fi
+      if [ "$owned_result" = 0 ]; then kill -KILL "$pid" 2>/dev/null || true; fi
+      if kill -0 "$pid" 2>/dev/null && [ "$owned_result" = 0 ]; then
+        echo "STOP_PIDFILE=STILL_ALIVE pid=$pid file=$pf pidfile=RETAINED" >&2
+        STOP_INCOMPLETE=1; return 0
+      fi
+    fi
   fi
   rm -f "$pf" 2>/dev/null || true
 }
@@ -48,6 +70,9 @@ stop_pidfile() {
 owned_pid() {
   owned_args=$(pidin -p "$1" ar 2>/dev/null) || owned_args=""
   if [ -z "$owned_args" ]; then owned_args=$(ps -p "$1" -o args= 2>/dev/null) || owned_args=""; fi
+  # Empty inventory is not evidence of a different process. Keep the handle
+  # when tools/permissions are unavailable so a later STOP can retry safely.
+  [ -n "$owned_args" ] || return 2
   case "$2" in
     *rgi_renderer.pid) owned_name=maneuver_render ;;
     *rgi_supervisor.pid) owned_name=rgi_supervisor.sh ;;
@@ -88,4 +113,8 @@ stop_pidfile "$LEGACY_NS/pid" 30
 rm -f "$LEGACY_NS/ready" "$LEGACY_NS/basevideo.ready" 2>/dev/null || true
 rmdir "$LEGACY_NS/recovery.lock" 2>/dev/null || true
 
+if [ "$STOP_INCOMPLETE" != 0 ]; then
+  echo "MIRROR_DISPLAY=STOP_INCOMPLETE pidfile=RETAINED action=RETRY_STOP" >&2
+  exit 1
+fi
 echo "MIRROR_DISPLAY=STOPPED lifecycle_watch=STOPPED context_writer=JAVA80 native_dmdt=DISABLED stop_guard=$([ -f "$STOP_GUARD" ] && echo RETAINED || echo ABSENT) volatile_mode=FLAT_TMP"

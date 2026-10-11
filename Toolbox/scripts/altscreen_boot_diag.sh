@@ -168,10 +168,23 @@ flat_capture_delta() {
         # the bytes actually copied, or the next poll duplicates those bytes.
         flat_bytes=$(wc -c < "$flat_temp")
         if flat_plain_append "$flat_temp" "$flat_target" 2>/dev/null; then
+            rm -f "${flat_temp}.write-failed" 2>/dev/null || true
             flat_offset=$((flat_offset + flat_bytes))
             if [ "$flat_source" = "${flat_system:-}" ]; then flat_audio_capture "$flat_temp"; fi
         else
-            printf 'CAPTURE_WRITE_FAILED target=%s retained_offset=%s\n' "$flat_target" "$flat_offset" >&2
+            # The source remains captured with the same offset. One marker
+            # per source suppresses repeated SD failure messages across command
+            # substitutions; clear it only after a successful write.
+            if [ ! -f "${flat_temp}.write-failed" ]; then
+                flat_entry=$(select_boot_entry_source)
+                flat_entry_size=$(wc -c < "$flat_entry" 2>/dev/null) || flat_entry_size=0
+                set -- $flat_entry_size
+                case "${1:-0}" in *[!0-9]*) ;; *)
+                    if [ "${1:-0}" -ge 65536 ]; then (printf '' > "$flat_entry") 2>/dev/null || true; fi ;;
+                esac
+                printf 'CAPTURE_WRITE_FAILED target=%s retained_offset=%s further_errors=suppressed_until_success\n' "$flat_target" "$flat_offset" >&2
+                printf '' > "${flat_temp}.write-failed" 2>/dev/null || true
+            fi
         fi
         rm -f "$flat_temp"
     fi
@@ -544,6 +557,8 @@ while [ -f "$ENABLED" ]; do
     if [ $((storage_wait % 30)) -eq 0 ]; then
         boot_entry=$(select_boot_entry_source)
         boot_size=$(wc -c < "$boot_entry" 2>/dev/null) || boot_size=0
+        set -- $boot_size
+        boot_size=${1:-0}
         case "$boot_size" in ''|*[!0-9]*) boot_size=0 ;; esac
         if [ "$boot_size" -ge 65536 ]; then (printf '' > "$boot_entry") 2>/dev/null || true; fi
         echo "SD_WAIT storage=FLAT_TMP_PLAINTEXT_SD attempt=$storage_wait"

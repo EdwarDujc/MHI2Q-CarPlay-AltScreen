@@ -56,7 +56,7 @@ public class CarPlayHook {
             requestedActive = activate;
             lifecyclePending = true;
             if (!activate) cleanupPending = true;
-            if (lifecycleWorker == null) {
+            if (lifecycleWorker == null || !lifecycleWorker.isAlive()) {
                 Thread worker = new Thread(new Runnable() {
                     public void run() {
                         while (true) {
@@ -76,7 +76,7 @@ public class CarPlayHook {
                                     if (cleanup || !activate) deactivateNow();
                                     if (activate) activateNow(context);
                                 }
-                            } catch (Throwable t) { Log.e(TAG, "lifecycle worker", t); }
+                            } catch (Throwable t) { try { Log.e(TAG, "lifecycle worker", t); } catch (Throwable ignored) { } }
                         }
                     }
                 }, "carplay-oem-lifecycle");
@@ -117,6 +117,7 @@ public class CarPlayHook {
     private static void activateNow(Object context) {
         if (active && savedContext != context) deactivateNow();
         ++activationGeneration;
+        Log.refreshLevel();
         Log.i(TAG, "onActivate");
         Log.i(TAG, "Build: " + BUILD_ID);
 
@@ -362,7 +363,7 @@ public class CarPlayHook {
     }
 
     private static void pollRgiRuntimeNow() {
-        com.luka.carplay.core.ScreenNavStatusGate.retryPending();
+        com.luka.carplay.core.ScreenNavStatusGate.retryPending(active);
         long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (active && savedContext != null &&
                 (now < lastServiceProbe || now - lastServiceProbe >= 1000L)) {

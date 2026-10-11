@@ -1053,14 +1053,14 @@ static __attribute__((noinline)) int bearer_close_forward(int fd) {
     if (!real_close) return -1;
     if (!altscreen_runtime_is_ready() || !p1404_armed || fd < 0)
         return real_close(fd);
-    nested = bearer_enter();
-    if (nested < 0) { bearer_set_error(11); return -1; }
+    while ((nested = bearer_enter()) < 0) p1404_lock_wait_yield();
     if (!g_forward_ready) {
         if (!nested) bearer_leave();
         bearer_set_error(11);
         return -1;
     }
     if (!nested) bearer_reap_done();
+retry_close_lookup:
     bearer_tx_lock();
     /* A PINNING operation still needs the original descriptor for dup. Never
      * wait behind it and never close underneath it; the caller gets a genuine
@@ -1089,9 +1089,8 @@ static __attribute__((noinline)) int bearer_close_forward(int fd) {
             }
         if (guard_index < 0) {
             bearer_tx_unlock();
-            if (!nested) bearer_leave();
-            bearer_set_error(11);
-            return -1;
+            p1404_lock_wait_yield();
+            goto retry_close_lookup;
         }
         bearer_tx_unlock();
         if (!nested) bearer_leave();
