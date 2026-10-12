@@ -160,7 +160,7 @@ fi
 
 mount_app_rw || { echo "FAIL: cannot mount /mnt/app to remove Java HMI"; exit 1; }
 TMP="$JAR.basevideo3.restore.tmp"
-rm -f "$JAR" "$TMP" || {
+rm -f "$JAR" "$TMP" "$JAR.basevideo3.tmp" || {
     mount_app_ro >/dev/null 2>&1 || true
     echo "FAIL: cannot remove project-owned carplay_hook.jar"; exit 1; }
 [ ! -e "$JAR" ] || { mount_app_ro >/dev/null 2>&1 || true; echo "FAIL: carplay_hook.jar remains after removal"; exit 1; }

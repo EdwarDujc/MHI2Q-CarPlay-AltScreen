@@ -110,7 +110,8 @@ esac
 
 TMP="$FILE.v33-rgi.$$"
 rm -f "$TMP" 2>/dev/null || true
-trap 'rm -f "$TMP" 2>/dev/null || true' 0 1 2 15
+trap 'rm -f "$TMP" 2>/dev/null || true' 0
+trap 'exit 130' 1 2 15
 
 awk '
   function find_close(s,start,   i,c,q,e) {

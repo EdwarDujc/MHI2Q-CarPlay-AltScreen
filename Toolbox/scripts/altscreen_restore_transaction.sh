@@ -1,8 +1,11 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # V3 transactional RESTORE ORIGINAL wrapper.
 # Preflight first, snapshot the complete project-owned persistent state, run the
 # proven restore APPLY step, verify, and roll back on any handled failure.
 set -u
+COMMIT_DURABLE=0
 
 ensure_dirs(){ for d in "$@"; do [ -d "$d" ] || mkdir -p "$d" || return 1; done; }
 
@@ -116,6 +119,16 @@ if ! (printf '' >> "$LOG") 2>/dev/null; then
 fi
 exec 3>&1; exec >> "$LOG" 2>&1
 log(){ echo "$*"; echo "$*" >&3; }
+run_detail(){
+  detail_file="$SD/staging-detail.$$"
+  "$@" > "$detail_file" 2>&1
+  detail_rc=$?
+  cat "$detail_file"
+  cat "$detail_file" >&3
+  rm -f "$detail_file" 2>/dev/null || true
+  return "$detail_rc"
+}
+
 
 size(){ n=$(wc -c < "$1" 2>/dev/null || echo 0); set -- $n; echo "${1:-0}"; }
 same(){ [ -f "$1" ] && [ -f "$2" ] && [ "$(size "$1")" = "$(size "$2")" ] && [ "$(cksum < "$1")" = "$(cksum < "$2")" ]; }
@@ -198,11 +211,11 @@ same_dir_exact(){
   return "$rc"
 }
 finish_mounts(){
-  r=0
-  sync >/dev/null 2>&1 || r=1
-  [ "$APP_RW" = 0 ] || { mount_app_ro >/dev/null 2>&1 || r=1; APP_RW=0; }
-  [ "$SYS_RW" = 0 ] || { mount_system_ro >/dev/null 2>&1 || r=1; SYS_RW=0; }
-  return "$r"
+  mount_finish_rc=0
+  sync >/dev/null 2>&1 || mount_finish_rc=1
+  [ "$APP_RW" = 0 ] || { mount_app_ro >/dev/null 2>&1 && APP_RW=0 || mount_finish_rc=1; }
+  [ "$SYS_RW" = 0 ] || { mount_system_ro >/dev/null 2>&1 && SYS_RW=0 || mount_finish_rc=1; }
+  return "$mount_finish_rc"
 }
 
 snapshot_marker_kind(){
@@ -230,7 +243,7 @@ validate_file_snapshot(){
     if [ -f "$TXN/meta/$name.cksum" ]; then
       [ "$(cksum < "$src")" = "$(cat "$TXN/meta/$name.cksum")" ] || return 1
     else
-      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" != 2 ] || return 1
+      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" = 1 ] || return 1
       log "RESTORE_SNAPSHOT_INTEGRITY=LEGACY_WEAK kind=file name=$name reason=missing_cksum_metadata"
     fi
   else
@@ -246,7 +259,7 @@ restore_file(){
     ensure_dirs "$(dirname -- "$dst")" || return 1
     tmp="${dst}.restore.new"
     rm -f "$tmp" 2>/dev/null || true
-    cp "$src" "$tmp" && chmod "$mode" "$tmp" && same "$src" "$tmp" && mv "$tmp" "$dst"
+    cp "$src" "$tmp" && chmod "$mode" "$tmp" && same "$src" "$tmp" && mv "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
   else
     rm -f "$dst"
   fi
@@ -279,7 +292,7 @@ validate_dir_snapshot(){
       cmp -s "$TXN/meta/$name.manifest" "$now" || { rm -f "$now" 2>/dev/null || true; return 1; }
       rm -f "$now" 2>/dev/null || true
     else
-      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" != 2 ] || return 1
+      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" = 1 ] || return 1
       log "RESTORE_SNAPSHOT_INTEGRITY=LEGACY_WEAK kind=dir name=$name reason=missing_manifest_metadata"
     fi
   else
@@ -309,7 +322,40 @@ verify_dir_snapshot(){
   if [ "$kind" = present ]; then [ -d "$dst" ] && same_dir_exact "$src" "$dst"; else [ ! -e "$dst" ]; fi
 }
 
+# A retained transaction must not roll a different car/firmware back to its
+# saved paths just because both cars use the same absolute production paths.
+snapshot_device_identity(){
+  identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
+  [ -f "$identity_helper" ] || return 1
+  /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.identity" || return 1
+  /bin/sh "$identity_helper" vehicle-key > "$TXN/meta/vehicle.key" || printf '' > "$TXN/meta/vehicle.key"
+  cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum > "$TXN/meta/device.cksum" || return 1
+}
+validate_device_identity(){
+  identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
+  if [ ! -f "$TXN/meta/device.identity" ] || [ ! -f "$TXN/meta/vehicle.key" ] || [ ! -f "$TXN/meta/device.cksum" ]; then
+    log "DEVICE_SNAPSHOT=REFUSED reason=UNBOUND_LEGACY_TRANSACTION recovery_required=YES"
+    return 1
+  fi
+  [ "$(cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum)" = "$(cat "$TXN/meta/device.cksum")" ] || return 1
+  /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.current" &&
+    cmp -s "$TXN/meta/device.identity" "$TXN/meta/device.current" || {
+      rm -f "$TXN/meta/device.current" 2>/dev/null || true
+      log "DEVICE_SNAPSHOT=REFUSED reason=FIRMWARE_OR_BINARY_MISMATCH recovery_required=YES"
+      return 1
+    }
+  rm -f "$TXN/meta/device.current" 2>/dev/null || true
+  run_detail /bin/sh "$identity_helper" snapshot-context "$TXN" || return 1
+  key=$(cat "$TXN/meta/vehicle.key")
+  [ -z "$key" ] || [ "$key" = "$(/bin/sh "$identity_helper" vehicle-key || true)" ] || {
+    log "DEVICE_SNAPSHOT=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE recovery_required=YES"
+    return 1
+  }
+  return 0
+}
+
 validate_restore_snapshot(){
+  validate_device_identity || return 1
   s=$(cat "$TXN/startup.path" 2>/dev/null || true)
   case "$s" in
     "$(p /mnt/system/etc/boot/startup.sh)"|"$(p /etc/boot/startup.sh)") ;;
@@ -368,7 +414,8 @@ snapshot(){
   [ ! -e "$STATE/.chain_test.lock" ] || { log "RESTORE=REFUSED reason=CHAIN_LOCK_PRESENT_AFTER_PRECHECK production_changed=NO"; return 1; }
   rm -rf "$TXN" 2>/dev/null || return 1
   ensure_dirs "$TXN/files" "$TXN/dirs" "$TXN/meta" || return 1
-  printf '%s\n' 2 > "$TXN/FORMAT" || return 1
+  printf '%s\n' 3 > "$TXN/FORMAT" || return 1
+  snapshot_device_identity || return 1
   STARTUP=$(find_startup) || return 1
   echo "$STARTUP" > "$TXN/startup.path" || return 1
   snap_file "$STARTUP" startup.sh || return 1
@@ -416,10 +463,12 @@ rollback(){
     [ -n "$s" ] && restore_file "$s" startup.sh 755 || r=1
     restore_file "$SI" smartphone_integrator.json 644 || r=1
     restore_file "$DIO" dio_manager.json 644 || r=1
+    rm -f "$DIO".v33-rgi.[0-9]* "$SI".v33-rgi.[0-9]* 2>/dev/null || r=1
     restore_file "$PF" pf.conf 644 || r=1
   fi
   if [ "$APP_RW" = 1 ]; then
     restore_file "$JAR" carplay_hook.jar 644 || r=1
+    rm -f "$JAR.basevideo3.tmp" "$JAR.basevideo3.restore.tmp" 2>/dev/null || r=1
     restore_file "$LEGACY_HOOK" legacy_hook 755 || r=1
     ensure_dirs "$LIBTARGET" || r=1
     for n in libairplay.so libairplax.so libNmeBaseClasses.so; do restore_file "$LIBTARGET/$n" "libtarget_$n" 755 || r=1; done
@@ -468,10 +517,14 @@ recover_stale(){
 
 fail(){
   msg=$1
+  if [ "${COMMIT_DURABLE:-0}" = 1 ]; then
+    log "RESTORE=COMMITTED cleanup_interrupted=YES reboot_required=YES"
+    exit 0
+  fi
   log "ERROR: $msg"
   finish_mounts >/dev/null 2>&1 || true
   if [ "$ROLLING_BACK" = 0 ] && [ "$TXN_READY" = 1 ]; then
-    rollback && log "RESTORE=ABORTED rollback=PASS" ||
+    rollback && log "RESTORE=ABORTED rollback=PASS runtime_stopped=YES reboot_required=YES" ||
       log "RESTORE=FAILED rollback=INCOMPLETE recovery_required=YES"
   elif [ "$PRE_RECOVERY_CHANGED" = 1 ]; then
     log "RESTORE=REFUSED production_changed=RECOVERY_ONLY current_restore_mutation=NO"
@@ -487,21 +540,37 @@ if [ -d "$INSTALL_TXN" ]; then
   [ -f "$INSTALL_TXN_HELPER" ] || fail "active install transaction exists but recovery helper is missing"
   log "ACTIVE_INSTALL_TRANSACTION=DETECTED action=ROLLBACK_PRE_INSTALL_BEFORE_RESTORE"
   PRE_RECOVERY_CHANGED=1
-  /bin/sh "$INSTALL_TXN_HELPER" recover || fail "active install transaction could not be recovered before restore"
+  run_detail /bin/sh "$INSTALL_TXN_HELPER" recover || fail "active install transaction could not be recovered before restore"
   log "PRE_RESTORE_RECOVERY=PASS kind=INSTALL_TRANSACTION production_changed=RECOVERY_TO_PRE_INSTALL"
 fi
 recover_stale || fail "previous restore transaction could not be recovered"
 [ -f "$CONTROLLER" ] && [ -f "$APPLY" ] || fail "restore controller/apply helper missing"
+# Recovery may already have returned a first, interrupted INSTALL to stock.
+# A clean vehicle requires no backup and is a successful no-op.
+. "$VOLUME/Toolbox/scripts/altscreen_console.sh"
+alts_detect_previous "$ROOT" "$VOLUME"
+case "$ALTS_PREVIOUS" in
+  *runtime*|*hmi*|*preload*|*autostart*) ;;
+  *)
+    if [ ! -e "$LEGACY_HOOK" ] && [ ! -e "$STAGE" ] && [ ! -e "$PREV" ] &&
+       ! grep -Eq '"0x520[0-4]"' "$DIO" 2>/dev/null &&
+       ! grep -Eq 'ALTSCREEN|ALT111' "$PF" 2>/dev/null; then
+      rm -f "$STATE/INSTALLED" "$STATE/firmware_profile.txt" "$STATE/run_id" "$STATE/session_path" 2>/dev/null || true
+      log "RESTORE=NOTHING_TO_RESTORE production_changed=NO"
+      trap - 1 2 15
+      exit 0
+    fi ;;
+esac
 preflight_startup || fail "startup restore preflight failed"
-/bin/sh "$CONTROLLER" restore-precheck || fail "native/runtime restore precheck failed"
+run_detail /bin/sh "$CONTROLLER" restore-precheck || fail "native/runtime restore precheck failed"
 log "RESTORE_PREFLIGHT=PASS hmi=PROJECT_OWNED_DELETE startup=SAFE native_runtime=SAFE production_changed=NO"
 detect_mixed_restore_state
 snapshot || { rm -rf "$TXN" 2>/dev/null || true; fail "pre-restore transaction snapshot failed"; }
 touch "$TXN/APPLYING" || fail "cannot mark transaction APPLYING"
-/bin/sh "$APPLY" || fail "restore APPLY step failed"
+run_detail /bin/sh "$APPLY" || fail "restore APPLY step failed"
 
 # Re-verify every file in the trusted native original manifest, not only the
-# two JSONs. The universal restore may also restore dio_manager/libairplay/NME.
+# two JSONs. UNIVERSAL verifies unchanged stock binaries without writing them.
 [ -f "$NATIVE/manifest.txt" ] || fail "native original manifest missing after restore"
 NATIVE_COUNT=0
 while IFS= read -r rel; do
@@ -567,6 +636,8 @@ STARTUP=$(find_startup) || fail "startup.sh missing after restore"
 sync >/dev/null 2>&1 || fail "sync failed before restore commit"
 touch "$TXN/COMMITTED" || fail "cannot commit restore transaction"
 sync >/dev/null 2>&1 || fail "cannot durably commit restore transaction"
+COMMIT_DURABLE=1
+trap - 1 2 15
 TXN_READY=0
 if [ "$MIXED_RECOVERY" = 1 ]; then
   log "RESTORE_MIXED_STATE_RECOVERY=PASS trusted_backups=YES runtime=ABSENT preload=REMOVED"

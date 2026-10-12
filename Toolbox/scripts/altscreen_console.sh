@@ -214,7 +214,7 @@ alts_detect_previous() {
     [ -d "$alts_dp_sd/restore-transaction/active" ] && ALTS_PREVIOUS="$ALTS_PREVIOUS unfinished-restore"
     [ -e "$alts_dp_root/mnt/app/root/carplay-altscreen" ] && ALTS_PREVIOUS="$ALTS_PREVIOUS runtime"
     [ -e "$alts_dp_root/mnt/app/eso/hmi/lsd/jars/carplay_hook.jar" ] && ALTS_PREVIOUS="$ALTS_PREVIOUS hmi"
-    grep -Eq 'libcarplay_(altscreen|rgi_meta)\.so' "$alts_dp_root/mnt/system/etc/eso/production/smartphone_integrator.json" 2>/dev/null &&
+    grep -Eq 'libcarplay_(altscreen|rgi_meta|hook)[^" :]*[.]so|libcp_mirror[.]so|libairplax[.]so|/root/lib-target/'  "$alts_dp_root/mnt/system/etc/eso/production/smartphone_integrator.json" 2>/dev/null &&
         ALTS_PREVIOUS="$ALTS_PREVIOUS preload"
     for alts_dp_s in "$alts_dp_root/mnt/system/etc/boot/startup.sh" "$alts_dp_root/etc/boot/startup.sh"; do
         [ -f "$alts_dp_s" ] || continue
@@ -228,7 +228,10 @@ alts_detect_previous() {
 # alts_ui_restore_result RC [PREVIOUS]  - RESULT block for RESTORE-style actions.
 # PREVIOUS is the ALTS_PREVIOUS value detected before the restore ran.
 alts_ui_restore_result() {
-    if [ "$1" -eq 0 ]; then
+    if [ "$1" -eq 0 ] && alts_ui_log_has 'RESTORE=NOTHING_TO_RESTORE'; then
+        alts_ui_result "NOTHING TO RESTORE" \
+            "The head unit is already stock. No vehicle files were changed."
+    elif [ "$1" -eq 0 ]; then
         alts_ui_result "SUCCESS" \
             "The head unit is back to the stock configuration." \
             "Next: fully reboot the head unit." \
@@ -242,7 +245,13 @@ alts_ui_restore_result() {
             "Restore stopped and its rollback was incomplete." \
             "Do NOT reboot. Run RESTORE ORIGINAL again; if it" \
             "still fails, keep this SD card and the log."
-    elif alts_ui_log_has 'no trusted restore route' || alts_ui_log_has 'backup unavailable' ||
+    elif alts_ui_log_has 'BACKUP_IDENTITY=REFUSED'; then
+        alts_ui_result "FAILED" \
+            "The backup does not match this firmware/head unit."             "No restore was applied. Keep both backups and the log."
+    elif alts_ui_log_has 'runtime_stopped=YES'; then
+        alts_ui_result "FAILED" \
+            "Files were rolled back, but display/RGI were stopped."             "Fully reboot to resume the previous installation."
+    elif alts_ui_log_has 'no trusted restore route'  || alts_ui_log_has 'backup unavailable' ||
          alts_ui_log_has 'backup damaged'; then
         alts_ui_result "FAILED" \
             "No usable stock backup was found on this SD card." \
@@ -250,8 +259,8 @@ alts_ui_restore_result() {
             "the original install and try again."
     else
         alts_ui_result "FAILED" \
-            "Restore did not complete; the head unit was left" \
-            "as it was before RESTORE. Check the log, then" \
+            "Restore did not complete. Check the detailed log" \
+            "to confirm the current state, then" \
             "run RESTORE ORIGINAL again."
     fi
 }

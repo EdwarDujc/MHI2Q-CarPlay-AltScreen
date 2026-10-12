@@ -170,7 +170,7 @@ if ! ALTS_OPLOG_CAPTURED=1 ALTS_PACKAGE_PREFLIGHT=1 \
      alts_ui_run /bin/sh "$SCRIPTS/install_mmi_cockpit_carplay_rx.sh"; then
     finish FAILED 1 \
         "The package is incomplete or its scripts are invalid." \
-        "The previous installation was not removed." \
+        "The head unit was not changed by package preflight." \
         "Copy the full Toolbox folder to the SD card again."
 fi
 
@@ -228,6 +228,15 @@ if [ "$DISPLAY_PRECHECK_RC" != 0 ]; then
     finish FAILED 1 "Separate Mirror is still running." \
         "Stop that Mirror package before installing AltScreen." \
         "The previous installation and its backup were not changed."
+fi
+
+# Recover a pending INSTALL before deciding whether a previous version exists.
+if [ -d "$SD/install-transaction/active" ]; then
+    ALTS_OPLOG_CAPTURED=1 alts_ui_run /bin/sh "$SCRIPTS/altscreen_install_transaction.sh" recover ||
+        finish FAILED 1 "Previous install recovery failed." "Do NOT reboot. Keep this SD card and the log."
+fi
+if ! alts_ui_run /bin/sh "$SCRIPTS/altscreen_chain_test_universal.sh" backup-precheck; then
+    finish FAILED 1 "Stock backup does not match this head unit, or is damaged."         "No previous installation was removed."         "Use this head unit's matching stock backup; keep both backups."
 fi
 
 # ---------------------------------------------------------------- step 2

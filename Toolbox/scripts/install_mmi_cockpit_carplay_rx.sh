@@ -221,6 +221,7 @@ MIRROR_RUNTIME="$DEVICE_ROOT/mnt/app/root/carplay-altscreen/bin/mirror"
 
 fail(){
     msg=$1
+    rm -f "$JAR_TARGET.basevideo3.tmp" 2>/dev/null || true
     mount_app_ro >/dev/null 2>&1 || true
     echo "FAIL: $msg; INSTALL transaction will roll back" >&2
     exit 1
@@ -229,6 +230,8 @@ fail(){
 mount_app_rw || fail "cannot mount /mnt/app writable"
 ensure_dirs "$JAR_TARGET_DIR" || fail "cannot create HMI JAR directory"
 TMP="$JAR_TARGET.basevideo3.tmp"
+trap 'rm -f "$TMP" 2>/dev/null || true; mount_app_ro >/dev/null 2>&1 || true' 0
+trap 'exit 130' 1 2 15
 rm -f "$TMP" 2>/dev/null || true
 cp "$JAR_SOURCE" "$TMP" || fail "cannot stage Java80 HMI JAR"
 chmod 644 "$TMP" || fail "cannot chmod Java80 HMI JAR"

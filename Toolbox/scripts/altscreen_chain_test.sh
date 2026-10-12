@@ -187,7 +187,7 @@ validate_runtime_sources(){
         [ -s "$src" ] || { echo "FAIL: runtime companion missing/empty: $src" >&2; return 1; }
         case "$name" in *.sh) sh -n "$src" || { echo "FAIL: runtime companion shell syntax: $name" >&2; return 1; } ;; esac
     done
-    for name in carplay-alt111-mirror-display start_vehicle.sh stop_vehicle.sh stream_supervisor.sh rgi_supervisor.sh BUILD_INFO.txt; do
+    for name in carplay-alt111-mirror-display start_vehicle.sh stop_vehicle.sh stream_supervisor.sh rgi_supervisor.sh BUILD_INFO.txt LICENSE.MMI-MIRROR SHA256SUMS; do
         [ -s "$MIRROR_SD/$name" ] || { echo "FAIL: integrated direct-display sidecar missing/empty: $MIRROR_SD/$name" >&2; return 1; }
     done
     grep -Fq 'release_binary_status=PRIVATE111_DIRECT_DISPLAY_V3_5' "$MIRROR_SD/BUILD_INFO.txt" 2>/dev/null &&

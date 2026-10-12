@@ -324,10 +324,10 @@ lock_release(){
     return 0
 }
 finish_mounts(){
-    rc=0; sync || rc=1
-    if [ "$MR_APP" = 1 ]; then mount_ro "$(p /mnt/app)" && MR_APP=0 || rc=1; fi
-    if [ "$MR_SYS" = 1 ]; then mount_ro "$(p /mnt/system)" && MR_SYS=0 || rc=1; fi
-    return "$rc"
+    mount_finish_rc=0; sync || mount_finish_rc=1
+    if [ "$MR_APP" = 1 ]; then mount_ro "$(p /mnt/app)" && MR_APP=0 || mount_finish_rc=1; fi
+    if [ "$MR_SYS" = 1 ]; then mount_ro "$(p /mnt/system)" && MR_SYS=0 || mount_finish_rc=1; fi
+    return "$mount_finish_rc"
 }
 
 verify_backup() (
@@ -360,18 +360,170 @@ verify_backup() (
     done < "$BACKUP_DIR/overlay_present.txt"
 )
 
-backup_originals() (
-    if [ -f "$COMPLETE_MARKER" ]; then verify_backup || return 1; say "BACKUP=EXISTING kept"; return 0; fi
-    live_si=$(p "$LIVE_JSON_SI")
-    if grep -Eq 'libcarplay_(altscreen|rgi_meta)\.so' "$live_si" 2>/dev/null ||
+# Identity is checked before any vehicle mutation. Stock binaries are witnesses,
+# never restore payloads for UNIVERSAL. Legacy backups additionally require the
+# live configuration to be exactly stock or one of our deterministic edits.
+current_train() (
+    for rel in /net/rcc/dev/shmem/version.txt /dev/shmem/version.txt /net/mmx/dev/shmem/version.txt; do
+        f=$(p "$rel"); [ -r "$f" ] || continue
+        value=$(sed -n '/Current train/p' "$f" | head -n 1 | sed "s/^[^=]*=[[:space:]]*//;s/'//g;s/\"//g;s/[[:space:]\r]*$//")
+        [ -n "$value" ] && { printf '%s\n' "$value"; return 0; }
+    done
+    return 1
+)
+current_vehicle_key() (
+    # Use an available OEM VIN only as an additional witness, without logging it.
+    command -v pidin >/dev/null 2>&1 || return 1
+    value=$(pidin ar 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^-DmyAudi[.]VIN=/) {sub(/^-DmyAudi[.]VIN=/,"",$i); if(length($i)==17 && $i !~ /[^A-Z0-9]/) {print $i;exit}}}')
+    [ -n "$value" ] || return 1
+    printf '%s' "$value" | cksum
+)
+current_device_identity() (
+    current_train || return 1
+    dio=$(locate_first "$LIVE_DIO_CANDIDATES") || return 1
+    nme=$(locate_first "$LIVE_NME_CANDIDATES") || return 1
+    for rel in "$dio" "$LIVE_LIBAIRPLAY" "$nme"; do
+        [ -s "$(p "$rel")" ] || return 1
+        printf '%s|' "$rel"
+        cksum < "$(p "$rel")" || return 1
+    done
+)
+verify_backup_identity() (
+    verify_backup || { say "FAIL: original backup unavailable or damaged"; return 1; }
+    train=$(current_train) || { say "BACKUP_IDENTITY=REFUSED reason=FIRMWARE_UNAVAILABLE production_changed=NO"; return 1; }
+    if [ -e "$BACKUP_DIR/firmware_train.txt" ] || [ -e "$BACKUP_DIR/vehicle_key.txt" ] || [ -e "$BACKUP_DIR/identity.cksum" ]; then
+        [ -s "$BACKUP_DIR/firmware_train.txt" ] && [ -f "$BACKUP_DIR/vehicle_key.txt" ] &&
+        [ -f "$BACKUP_DIR/identity.cksum" ] &&
+        [ "$(cat "$BACKUP_DIR/firmware_train.txt" "$BACKUP_DIR/vehicle_key.txt" | cksum)" = "$(cat "$BACKUP_DIR/identity.cksum")" ] || {
+            say "BACKUP_IDENTITY=REFUSED reason=IDENTITY_DAMAGED production_changed=NO"; return 1;
+        }
+        [ "$train" = "$(cat "$BACKUP_DIR/firmware_train.txt")" ] || {
+            say "BACKUP_IDENTITY=REFUSED reason=FIRMWARE_MISMATCH production_changed=NO"; return 1;
+        }
+        key=$(cat "$BACKUP_DIR/vehicle_key.txt")
+        if [ -n "$key" ]; then
+            [ "$key" = "$(current_vehicle_key || true)" ] || {
+                say "BACKUP_IDENTITY=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE production_changed=NO"; return 1;
+            }
+        fi
+    else
+        say "BACKUP_IDENTITY=LEGACY_CONTENT_BINDING train_not_recorded=YES stock_binary_writes=DISABLED"
+    fi
+    while IFS= read -r rel; do
+        case "$rel" in *.json) continue ;; esac
+        src="$BACKUP_DIR/files/$(echo "$rel" | tr '/' '_')"
+        same_bytes "$src" "$(p "$rel")" || {
+            say "BACKUP_IDENTITY=REFUSED reason=STOCK_BINARY_MISMATCH path=$rel production_changed=NO"; return 1;
+        }
+    done < "$BACKUP_MANIFEST"
+    say "BACKUP_IDENTITY=PASS stock_binaries=UNCHANGED"
+)
+verify_config_context() (
+    si=$1; dio=$2; pf=$3
+    [ -s "$si" ] && [ -s "$dio" ] && [ -s "$pf" ] || return 1
+    ensure_dirs "$TXN_DIR" || return 1
+    if ! same_bytes "$si" "$(p "$LIVE_JSON_SI")"; then
+        awk -v hook="$RGI_META_REL" -v exclude2="$RGI_META_REL" -v allow_absent=1 \
+            -v exclude=/mnt/app/root/hooks/libcarplay_hook.so -v insert_if_absent=1 \
+            -f "$PRELOAD_AWK" "$si" > "$TXN_DIR/identity.si.rgi" || return 1
+        awk -v hook="$UNIVERSAL_REL" -v exclude=/mnt/app/root/hooks/libcarplay_hook.so \
+            -v exclude2=/mnt/app/root/hooks/libcp_mirror.so -v exclude_prefix=/mnt/app/root/hooks/libcarplay_altscreen.so \
+            -v insert_if_absent=1 -f "$PRELOAD_AWK" "$TXN_DIR/identity.si.rgi" > "$TXN_DIR/identity.si" || return 1
+        if ! same_bytes "$TXN_DIR/identity.si" "$(p "$LIVE_JSON_SI")"; then
+            awk -v hook="$UNIVERSAL_REL" -v insert_if_absent=1 -f "$PRELOAD_AWK" "$si" > "$TXN_DIR/identity.si.legacy-no" || return 1
+            same_bytes "$TXN_DIR/identity.si.legacy-no" "$(p "$LIVE_JSON_SI")" || {
+                say "BACKUP_IDENTITY=REFUSED reason=SMARTPHONE_CONFIG_MISMATCH production_changed=NO"; return 1;
+            }
+        fi
+    fi
+    if ! same_bytes "$dio" "$(p "$LIVE_JSON_DIO")"; then
+        cp "$dio" "$TXN_DIR/identity.dio" && /bin/sh "$RGI_CONFIG" apply "$TXN_DIR/identity.dio" >/dev/null || return 1
+        same_bytes "$TXN_DIR/identity.dio" "$(p "$LIVE_JSON_DIO")" || {
+            say "BACKUP_IDENTITY=REFUSED reason=DIO_CONFIG_MISMATCH production_changed=NO"; return 1;
+        }
+    fi
+    strip_firewall_block "$pf" > "$TXN_DIR/identity.pf" || return 1
+    same_bytes "$pf" "$(p "$LIVE_PF_CONF")" ||
+    same_bytes "$TXN_DIR/identity.pf" "$(p "$LIVE_PF_CONF")" || {
+        say "BACKUP_IDENTITY=REFUSED reason=FIREWALL_CONFIG_MISMATCH production_changed=NO"; return 1;
+    }
+    say "BACKUP_CONTEXT=PASS config_changes=PROJECT_ONLY"
+)
+verify_backup_context() (
+    verify_backup_identity || return 1
+    verify_firewall_backup || { say "FAIL: firewall original backup unavailable or damaged"; return 1; }
+    verify_config_context "$BACKUP_DIR/files/_mnt_system_etc_eso_production_smartphone_integrator.json" \
+        "$BACKUP_DIR/files/_mnt_system_etc_eso_production_dio_manager.json" "$FIREWALL_BACKUP_FILE"
+)
+strip_owned_startup() {
+    awk '
+      {
+        key=$0;sub(/\r$/,"",key);gsub(/^[ \t]+|[ \t]+$/,"",key)
+        if(key ~ /^# BEGIN ALT111 (MIRROR|BASEVIDEO3) AUTOSTART$/ || key=="# BEGIN ALTSCREEN DIAGNOSTICS") {
+          if(inside)bad=1;inside=1;next
+        }
+        if(key ~ /^# END ALT111 (MIRROR|BASEVIDEO3) AUTOSTART$/ || key=="# END ALTSCREEN DIAGNOSTICS") {
+          if(!inside)bad=1;inside=0;next
+        }
+        if(!inside && key!="")print $0
+      }
+      END {if(inside||bad)exit 9}
+    ' "$1"
+}
+verify_snapshot_context() (
+    snapshot=$1
+    case "$snapshot" in "$SD_ROOT/install-transaction/active"|"$SD_ROOT/restore-transaction/active") ;; *) return 1 ;; esac
+    if [ -f "$COMPLETE_MARKER" ]; then
+        verify_backup_context || return 1
+    else
+        # First-install snapshot has the stock config before a backup exists.
+        verify_config_context "$snapshot/files/smartphone_integrator.json" \
+            "$snapshot/files/dio_manager.json" "$snapshot/files/pf.conf" || return 1
+    fi
+    ensure_dirs "$TXN_DIR" || return 1
+    startup=$(cat "$snapshot/startup.path") || return 1
+    case "$startup" in "$(p /mnt/system/etc/boot/startup.sh)"|"$(p /etc/boot/startup.sh)") ;; *) return 1 ;; esac
+    strip_owned_startup "$snapshot/files/startup.sh" > "$TXN_DIR/identity.startup.saved" &&
+    strip_owned_startup "$startup" > "$TXN_DIR/identity.startup.live" &&
+    same_bytes "$TXN_DIR/identity.startup.saved" "$TXN_DIR/identity.startup.live" || {
+        say "DEVICE_SNAPSHOT=REFUSED reason=STARTUP_CONTEXT_MISMATCH recovery_required=YES"; return 1;
+    }
+)
+pristine_precheck() (
+    if grep -Eq 'libcarplay_(altscreen|rgi_meta|hook)[^" :]*[.]so|libcp_mirror[.]so|libairplax[.]so|/root/lib-target/|/root/carplay-altscreen/' "$(p "$LIVE_JSON_SI")" 2>/dev/null ||
+       grep -Eq '"0x520[0-4]"' "$(p "$LIVE_JSON_DIO")" 2>/dev/null ||
+       grep -Eq 'ALTSCREEN|ALT111|carplay0.*(49152|65535)' "$(p "$LIVE_PF_CONF")" 2>/dev/null ||
        [ -e "$(p /mnt/app/eso/hmi/lsd/jars/carplay_hook.jar)" ]; then
-        say "NATIVE_REINSTALL_PRECHECK=FAIL reason=SMARTPHONE_INTEGRATOR_PRELOAD_PRESENT path=$LIVE_JSON_SI token=libcarplay_altscreen.so"
-        say "FAIL: trusted original backup is absent but live CarPlay config already references an AltScreen hook; reuse the original SD backup or restore stock first"
+        say "FAIL: trusted original backup unavailable; project/legacy configuration remains; use the original SD backup or restore stock first"
         return 1
     fi
+    for rel in /mnt/system/etc/boot/startup.sh /etc/boot/startup.sh; do
+        grep -Eq 'BEGIN ALT111|BEGIN ALTSCREEN' "$(p "$rel")" 2>/dev/null && {
+            say "FAIL: trusted original backup unavailable; project autostart remains"; return 1;
+        }
+    done
+    current_train >/dev/null || { say "FAIL: firmware version unavailable for original backup"; return 1; }
+    return 0
+)
+cmd_backup_precheck() (
+    lock_acquire
+    result=0
+    if [ -f "$COMPLETE_MARKER" ]; then verify_backup_context || result=1
+    else pristine_precheck || result=1
+    fi
+    lock_release || result=1
+    return "$result"
+)
+
+backup_originals() (
+    if [ -f "$COMPLETE_MARKER" ]; then verify_backup_context || return 1; say "BACKUP=EXISTING kept"; return 0; fi
+    pristine_precheck || return 1
     stage="$STAGING_ROOT/universal-original.$$"
     [ ! -e "$BACKUP_DIR" ] || { say "FAIL: incomplete original backup exists"; return 1; }
     ensure_dirs "$stage/files" || return 1
+    current_train > "$stage/firmware_train.txt" || return 1
+    current_vehicle_key > "$stage/vehicle_key.txt" || printf '' > "$stage/vehicle_key.txt"
+    cat "$stage/firmware_train.txt" "$stage/vehicle_key.txt" | cksum > "$stage/identity.cksum" || return 1
     printf '' > "$stage/manifest.txt"; printf '' > "$stage/overlay_present.txt"
     dio_rel=$(locate_first "$LIVE_DIO_CANDIDATES") || return 1
     nme_rel=$(locate_first "$LIVE_NME_CANDIDATES") || return 1
@@ -515,11 +667,14 @@ restore_universal_hook() (
     [ "$hook_rel" = "$UNIVERSAL_REL" ] || rm -f "$UNIVERSAL_DST" 2>/dev/null || return 1
 )
 restore_originals() (
-    verify_backup || return 1
+    verify_backup_identity || return 1
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         src="$BACKUP_DIR/files/$(echo "$rel" | tr '/' '_')"; dst=$(p "$rel"); mode=755
-        case "$rel" in *.json) mode=644 ;; esac
+        case "$rel" in
+          *.json) mode=644 ;;
+          *) say "RESTORE_STOCK_BINARY=SKIP_UNMODIFIED path=$rel"; continue ;;
+        esac
         stage_and_publish "$src" "$dst" "$mode" || return 1
         same_bytes "$src" "$dst" || return 1
     done < "$BACKUP_MANIFEST"
@@ -632,7 +787,7 @@ cmd_start(){
     awk -v query="$UNIVERSAL_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || {
         say "FAIL: universal preload is not armed in carplay env"; lock_release; return 1; }
 
-    run_id="$(date +%Y%m%d_%H%M%S)_$"; session="$LOG_ROOT/sessions/$run_id"
+    run_id="$(date +%Y%m%d_%H%M%S)_$$"; session="$LOG_ROOT/sessions/$run_id"
     ensure_dirs "$session" "$STATE_DIR" || { lock_release; return 1; }
     echo "$run_id" > "$STATE_DIR/run_id"; echo "$session" > "$STATE_DIR/session_path"
 
@@ -656,7 +811,7 @@ cmd_start(){
 cmd_restore_precheck(){
     lock_acquire
     rc=0
-    verify_backup || { say "FAIL: original backup unavailable or damaged"; rc=1; }
+    verify_backup_context || { say "FAIL: original backup unavailable, damaged or incompatible"; rc=1; }
     if [ "$rc" = 0 ]; then
         verify_universal_backup || { say "FAIL: universal hook backup unavailable or damaged"; rc=1; }
     fi
@@ -676,7 +831,7 @@ cmd_restore(){
     lock_acquire
     ensure_dirs "$TXN_DIR" || { lock_release; return 1; }
     system_space_snapshot restore_begin
-    verify_backup || { say "FAIL: original backup unavailable or damaged"; lock_release; return 1; }
+    verify_backup_context || { say "FAIL: original backup unavailable, damaged or incompatible"; lock_release; return 1; }
     verify_universal_backup || { say "FAIL: universal hook backup unavailable or damaged"; lock_release; return 1; }
     rm -f "$STATE_DIR/ARMED" "$STATE_DIR/ARMED_MUTATE" "$STATE_DIR/ARMED_IAP2" \
           "$STATE_DIR/ARMED_INFO" "$STATE_DIR/ARMED_FEATURE" "$STATE_DIR/ARMED_CREATE111" \
@@ -684,7 +839,8 @@ cmd_restore(){
     mount_rw "$(p /mnt/app)" || { lock_release; return 1; }; MR_APP=1
     mount_rw "$(p /mnt/system)" || { finish_mounts; lock_release; return 1; }; MR_SYS=1
     restore_originals || { say "FAIL: restore failed"; finish_mounts || true; lock_release; return 1; }
-    rm -f "$PROBE_MARKER" "$INSTALLED_MARKER"
+    rm -f "$(p "$LIVE_JSON_DIO")".v33-rgi.[0-9]* "$(p "$LIVE_JSON_SI")".install-rollback.new "$(p "$LIVE_JSON_DIO")".install-rollback.new || { finish_mounts; lock_release; return 1; }
+    rm -f "$PROBE_MARKER" "$INSTALLED_MARKER" "$STATE_DIR/firmware_profile.txt" "$STATE_DIR/run_id" "$STATE_DIR/session_path"
     touch "$STATE_DIR/RESTORE_PENDING_REBOOT"
     finish_mounts || { lock_release; return 1; }
     system_space_snapshot restore_end
@@ -749,6 +905,10 @@ case "$CMD" in
   install) cmd_install ;;
   start) cmd_start ;;
   status) cmd_status ;;
+  snapshot-context) verify_snapshot_context "${2:-}" ;;
+  device-identity) current_device_identity ;;
+  vehicle-key) current_vehicle_key ;;
+  backup-precheck) cmd_backup_precheck ;;
   restore-precheck) cmd_restore_precheck ;;
   restore) cmd_restore ;;
   collect) cmd_collect ;;

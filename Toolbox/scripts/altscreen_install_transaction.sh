@@ -7,6 +7,7 @@ export PATH
 # handled failure.  A stale PREPARED transaction is rolled back before any new
 # install is allowed.
 set -u
+COMMIT_DURABLE=0
 
 ensure_dirs(){ for d in "$@"; do [ -d "$d" ] || mkdir -p "$d" || return 1; done; }
 
@@ -65,6 +66,16 @@ printf '' >> "$LOG" 2>/dev/null || { echo "INSTALL=REFUSED reason=SD_LOG_NOT_WRI
 exec 3>&1
 exec >> "$LOG" 2>&1
 log(){ echo "$*"; echo "$*" >&3; }
+run_detail(){
+  detail_file="$SD/staging-detail.$$"
+  "$@" > "$detail_file" 2>&1
+  detail_rc=$?
+  cat "$detail_file"
+  cat "$detail_file" >&3
+  rm -f "$detail_file" 2>/dev/null || true
+  return "$detail_rc"
+}
+
 
 size(){ n=$(wc -c < "$1" 2>/dev/null || echo 0); set -- $n; echo "${1:-0}"; }
 same(){ [ -f "$1" ] && [ -f "$2" ] && [ "$(size "$1")" = "$(size "$2")" ] && [ "$(cksum < "$1")" = "$(cksum < "$2")" ]; }
@@ -91,11 +102,11 @@ same_dir_exact(){
 }
 
 finish_mounts(){
-  r=0
-  sync >/dev/null 2>&1 || r=1
-  [ "$APP_RW" = 0 ] || { mount_app_ro >/dev/null 2>&1 || r=1; APP_RW=0; }
-  [ "$SYS_RW" = 0 ] || { mount_system_ro >/dev/null 2>&1 || r=1; SYS_RW=0; }
-  return "$r"
+  mount_finish_rc=0
+  sync >/dev/null 2>&1 || mount_finish_rc=1
+  [ "$APP_RW" = 0 ] || { mount_app_ro >/dev/null 2>&1 && APP_RW=0 || mount_finish_rc=1; }
+  [ "$SYS_RW" = 0 ] || { mount_system_ro >/dev/null 2>&1 && SYS_RW=0 || mount_finish_rc=1; }
+  return "$mount_finish_rc"
 }
 
 snapshot_marker_kind(){
@@ -125,7 +136,7 @@ validate_file_snapshot(){
     if [ -f "$TXN/meta/$name.cksum" ]; then
       [ "$(cksum < "$src")" = "$(cat "$TXN/meta/$name.cksum")" ] || return 1
     else
-      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" != 2 ] || return 1
+      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" = 1 ] || return 1
       log "SNAPSHOT_INTEGRITY=LEGACY_WEAK kind=file name=$name reason=missing_cksum_metadata"
     fi
   else
@@ -141,7 +152,7 @@ restore_file(){
     ensure_dirs "$(dirname -- "$dst")" || return 1
     tmp="${dst}.install-rollback.new"
     rm -f "$tmp" 2>/dev/null || true
-    cp "$src" "$tmp" && chmod "$mode" "$tmp" && same "$src" "$tmp" && mv "$tmp" "$dst"
+    cp "$src" "$tmp" && chmod "$mode" "$tmp" && same "$src" "$tmp" && mv "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
   else
     rm -f "$dst"
   fi
@@ -177,7 +188,7 @@ validate_dir_snapshot(){
       cmp -s "$TXN/meta/$name.manifest" "$now" || { rm -f "$now" 2>/dev/null || true; return 1; }
       rm -f "$now" 2>/dev/null || true
     else
-      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" != 2 ] || return 1
+      [ "$(cat "$TXN/FORMAT" 2>/dev/null || true)" = 1 ] || return 1
       log "SNAPSHOT_INTEGRITY=LEGACY_WEAK kind=dir name=$name reason=missing_manifest_metadata"
     fi
   else
@@ -209,7 +220,40 @@ verify_dir_snapshot(){
   fi
 }
 
+# A retained transaction must not roll a different car/firmware back to its
+# saved paths just because both cars use the same absolute production paths.
+snapshot_device_identity(){
+  identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
+  [ -f "$identity_helper" ] || return 1
+  /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.identity" || return 1
+  /bin/sh "$identity_helper" vehicle-key > "$TXN/meta/vehicle.key" || printf '' > "$TXN/meta/vehicle.key"
+  cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum > "$TXN/meta/device.cksum" || return 1
+}
+validate_device_identity(){
+  identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
+  if [ ! -f "$TXN/meta/device.identity" ] || [ ! -f "$TXN/meta/vehicle.key" ] || [ ! -f "$TXN/meta/device.cksum" ]; then
+    log "DEVICE_SNAPSHOT=REFUSED reason=UNBOUND_LEGACY_TRANSACTION recovery_required=YES"
+    return 1
+  fi
+  [ "$(cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum)" = "$(cat "$TXN/meta/device.cksum")" ] || return 1
+  /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.current" &&
+    cmp -s "$TXN/meta/device.identity" "$TXN/meta/device.current" || {
+      rm -f "$TXN/meta/device.current" 2>/dev/null || true
+      log "DEVICE_SNAPSHOT=REFUSED reason=FIRMWARE_OR_BINARY_MISMATCH recovery_required=YES"
+      return 1
+    }
+  rm -f "$TXN/meta/device.current" 2>/dev/null || true
+  run_detail /bin/sh "$identity_helper" snapshot-context "$TXN" || return 1
+  key=$(cat "$TXN/meta/vehicle.key")
+  [ -z "$key" ] || [ "$key" = "$(/bin/sh "$identity_helper" vehicle-key || true)" ] || {
+    log "DEVICE_SNAPSHOT=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE recovery_required=YES"
+    return 1
+  }
+  return 0
+}
+
 validate_snapshot(){
+  validate_device_identity || return 1
   s=$(cat "$TXN/startup.path" 2>/dev/null || true)
   case "$s" in
     "$(p /mnt/system/etc/boot/startup.sh)"|"$(p /etc/boot/startup.sh)") ;;
@@ -266,7 +310,8 @@ snapshot(){
   chain_lock_precheck || return 1
   rm -rf "$TXN" 2>/dev/null || return 1
   ensure_dirs "$TXN/files" "$TXN/dirs" "$TXN/meta" || return 1
-  printf '%s\n' 2 > "$TXN/FORMAT" || return 1
+  printf '%s\n' 3 > "$TXN/FORMAT" || return 1
+  snapshot_device_identity || return 1
 
   STARTUP=$(find_startup) || { log "INSTALL=REFUSED reason=STARTUP_NOT_FOUND production_changed=NO"; return 1; }
   printf '%s\n' "$STARTUP" > "$TXN/startup.path" || return 1
@@ -348,11 +393,13 @@ rollback(){
     [ -n "$s" ] && restore_file "$s" startup.sh 755 || r=1
     restore_file "$SI" smartphone_integrator.json 644 || r=1
     restore_file "$DIO" dio_manager.json 644 || r=1
+    rm -f "$DIO".v33-rgi.[0-9]* "$SI".v33-rgi.[0-9]* 2>/dev/null || r=1
     restore_file "$PF" pf.conf 644 || r=1
   fi
 
   if [ "$APP_RW" = 1 ]; then
     restore_file "$JAR" carplay_hook.jar 644 || r=1
+    rm -f "$JAR.basevideo3.tmp" "$JAR.basevideo3.restore.tmp" 2>/dev/null || r=1
     restore_file "$LEGACY_HOOK" legacy_hook 755 || r=1
     restore_dir "$RUNTIME" runtime || r=1
     restore_dir "$RUNTIME_STAGE" runtime_stage || r=1
@@ -491,7 +538,7 @@ verify_installed(){
   # JAR is project-owned and is covered only by the INSTALL transaction snapshot.
   [ -f "$CONTROLLER" ] ||
     { log "INSTALL_VERIFY=FAIL reason=CONTROLLER_MISSING"; return 1; }
-  ALTS_INSTALL_TXN_ACTIVE=1 /bin/sh "$CONTROLLER" restore-precheck ||
+  ALTS_INSTALL_TXN_ACTIVE=1 run_detail /bin/sh "$CONTROLLER" restore-precheck ||
     { log "INSTALL_VERIFY=FAIL reason=NATIVE_RECOVERY_SET_INVALID"; return 1; }
   verify_boot_backup ||
     { log "INSTALL_VERIFY=FAIL reason=BOOT_DIAGNOSTICS_BACKUP_INVALID"; return 1; }
@@ -501,6 +548,10 @@ verify_installed(){
 }
 fail(){
   msg=$1
+  if [ "${COMMIT_DURABLE:-0}" = 1 ]; then
+    log "INSTALL=COMMITTED cleanup_interrupted=YES persistent_state=INSTALLED reboot_required=YES"
+    exit 0
+  fi
   log "ERROR: $msg"
   finish_mounts >/dev/null 2>&1 || true
   if [ "$ROLLING_BACK" = 0 ] && [ "$TXN_READY" = 1 ]; then
@@ -569,15 +620,17 @@ touch "$TXN/APPLYING" || fail "cannot mark install transaction APPLYING"
 
 if [ "$#" -gt 0 ]; then shift; fi
 if [ "$#" -gt 0 ]; then
-  ALTS_INSTALL_TXN_ACTIVE=1 ALTS_OPLOG_CAPTURED=1 /bin/sh "$INSTALLER" "$@" || fail "install APPLY step failed"
+  ALTS_INSTALL_TXN_ACTIVE=1 ALTS_OPLOG_CAPTURED=1 run_detail /bin/sh "$INSTALLER" "$@" || fail "install APPLY step failed"
 else
-  ALTS_INSTALL_TXN_ACTIVE=1 ALTS_OPLOG_CAPTURED=1 /bin/sh "$INSTALLER" || fail "install APPLY step failed"
+  ALTS_INSTALL_TXN_ACTIVE=1 ALTS_OPLOG_CAPTURED=1 run_detail /bin/sh "$INSTALLER" || fail "install APPLY step failed"
 fi
 
 verify_installed || fail "final installed-state verification failed"
 sync >/dev/null 2>&1 || fail "sync failed before install commit"
 touch "$TXN/COMMITTED" || fail "cannot commit install transaction"
 sync >/dev/null 2>&1 || fail "cannot durably commit install transaction"
+COMMIT_DURABLE=1
+trap - 1 2 15
 TXN_READY=0
 log "INSTALL=PASS transaction=COMMITTED persistent_state=INSTALLED reboot_required=YES"
 rm -rf "$TXN" 2>/dev/null || log "WARN: committed install transaction retained; next INSTALL/RESTORE will clean it"
