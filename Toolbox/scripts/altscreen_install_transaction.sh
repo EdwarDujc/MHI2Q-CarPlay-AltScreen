@@ -1,4 +1,6 @@
 #!/bin/sh
+ALTS_RESCUE_DISABLED=1; ALTS_RESCUE_RESTORE=0
+export ALTS_RESCUE_DISABLED ALTS_RESCUE_RESTORE
 PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
 export PATH
 # V3.1 transactional INSTALL wrapper.
@@ -12,7 +14,7 @@ COMMIT_DURABLE=0
 ensure_dirs(){ for d in "$@"; do [ -d "$d" ] || mkdir -p "$d" || return 1; done; }
 
 TESTING=${ALTSCREEN_CHAIN_TESTING:-0}
-ROOT=""; VOLUME=""; TXN_READY=0; ROLLING_BACK=0; APP_RW=0; SYS_RW=0
+ROOT=""; VOLUME=""; TXN_READY=0; ROLLING_BACK=0; APP_RW=0; SYS_RW=0; RECOVERY_CHANGED=0
 if [ "$TESTING" = 1 ]; then
   ROOT=${ALTSCREEN_CHAIN_ROOT:-}; VOLUME=${ALTSCREEN_CHAIN_VOLUME:-}
   case "$ROOT" in /tmp/*|/var/tmp/*) ;; *) echo "FAIL: invalid ALTSCREEN_CHAIN_ROOT" >&2; exit 2;; esac
@@ -66,15 +68,43 @@ printf '' >> "$LOG" 2>/dev/null || { echo "INSTALL=REFUSED reason=SD_LOG_NOT_WRI
 exec 3>&1
 exec >> "$LOG" 2>&1
 log(){ echo "$*"; echo "$*" >&3; }
+# Stream each step into both journals as it runs. The right side of the pipe
+# returns the command status, so POSIX sh needs neither pipefail nor an SD
+# staging/status file. A killed producer without its terminal record is failure.
 run_detail(){
-  detail_file="$SD/staging-detail.$$"
-  "$@" > "$detail_file" 2>&1
-  detail_rc=$?
-  cat "$detail_file"
-  cat "$detail_file" >&3
-  rm -f "$detail_file" 2>/dev/null || true
-  return "$detail_rc"
+  (
+    "$@" 2>&1
+    detail_rc=$?
+    printf '\nALTS_DETAIL_STATUS_%s=%s\n' "$$" "$detail_rc"
+  ) | (
+    detail_rc=1
+    while IFS= read -r detail_line || [ -n "$detail_line" ]; do
+      case "$detail_line" in
+        "ALTS_DETAIL_STATUS_$$="*) detail_rc=${detail_line#*=} ;;
+        *) printf '%s\n' "$detail_line"; printf '%s\n' "$detail_line" >&3 ;;
+      esac
+    done
+    case "$detail_rc" in ''|*[!0-9]*) detail_rc=1 ;; esac
+    exit "$detail_rc"
+  )
 }
+
+# Preserve details left by older releases; never reap a live operation's file.
+archive_stale_details(){
+  for stale_detail in "$SD"/staging-detail.*; do
+    [ -f "$stale_detail" ] && [ ! -L "$stale_detail" ] || continue
+    stale_pid=${stale_detail##*.}
+    case "$stale_pid" in ''|*[!0-9]*|0|1) continue ;; esac
+    kill -0 "$stale_pid" 2>/dev/null && continue
+    archived_detail="$SD/logs/interrupted-staging-detail.$stale_pid.log"
+    if cat "$stale_detail" >> "$archived_detail" && rm -f "$stale_detail"; then
+      log "INTERRUPTED_STEP_LOG=PRESERVED path=$archived_detail"
+    else
+      log "INTERRUPTED_STEP_LOG=RETAINED path=$stale_detail reason=ARCHIVE_FAILED"
+    fi
+  done
+}
+archive_stale_details
 
 
 size(){ n=$(wc -c < "$1" 2>/dev/null || echo 0); set -- $n; echo "${1:-0}"; }
@@ -245,10 +275,14 @@ validate_device_identity(){
   rm -f "$TXN/meta/device.current" 2>/dev/null || true
   run_detail /bin/sh "$identity_helper" snapshot-context "$TXN" || return 1
   key=$(cat "$TXN/meta/vehicle.key")
-  [ -z "$key" ] || [ "$key" = "$(/bin/sh "$identity_helper" vehicle-key || true)" ] || {
-    log "DEVICE_SNAPSHOT=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE recovery_required=YES"
-    return 1
-  }
+  if [ -n "$key" ]; then
+    live_key=$(/bin/sh "$identity_helper" vehicle-key || true)
+    if [ -z "$live_key" ]; then
+      log "DEVICE_SNAPSHOT_VEHICLE=WARNING reason=VIN_UNAVAILABLE"
+    elif [ "$key" != "$live_key" ]; then
+      log "DEVICE_SNAPSHOT_VEHICLE=WARNING reason=OTHER_VEHICLE_SNAPSHOT vin_values_logged=NO"
+    fi
+  fi
   return 0
 }
 
@@ -442,6 +476,7 @@ recover_stale(){
     log "STALE_INSTALL_TRANSACTION=DETECTED action=ROLLBACK_PRE_INSTALL"
     TXN_READY=1
     rollback || return 1
+    RECOVERY_CHANGED=1
     rm -rf "$TXN" || return 1
     TXN_READY=0
     log "STALE_INSTALL_TRANSACTION=RECOVERED persistent_state=PRE_INSTALL"
@@ -574,7 +609,11 @@ esac
 if [ "$ACTION" = recover ]; then
   log "===== V3.1 transactional INSTALL recovery started ====="
   recover_stale || { log "INSTALL_RECOVERY=FAIL"; exit 1; }
-  log "INSTALL_RECOVERY=PASS"
+  if [ "$RECOVERY_CHANGED" = 1 ]; then
+    log "INSTALL_RECOVERY=PASS production_changed=RECOVERY_TO_PRE_INSTALL reboot_required=YES"
+  else
+    log "INSTALL_RECOVERY=PASS production_changed=NO"
+  fi
   log "===== V3.1 transactional INSTALL recovery finished ====="
   exit 0
 fi

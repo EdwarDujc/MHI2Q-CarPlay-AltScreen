@@ -93,6 +93,11 @@ LIVE_PF_CONF="/mnt/system/etc/pf.conf"
 LIVE_LIBTARGET="/mnt/app/root/carplay-altscreen/lib"
 LEGACY_LIBTARGET="/mnt/app/root/lib-target"
 
+# Only the manual transaction entry enables rescue. INSTALL explicitly disables it.
+RESCUE_RESTORE=0
+if [ "${ALTS_RESCUE_RESTORE:-0}" = 1 ] && [ "${ALTS_RESCUE_DISABLED:-0}" != 1 ]; then
+    case "${1:-}" in restore|restore-precheck|rescue-precheck) RESCUE_RESTORE=1 ;; esac
+fi
 SD_ROOT="$VOLUME/MMI-Cockpit-Carplay"
 STATE_DIR="$SD_ROOT/state"
 LOG_ROOT="$SD_ROOT/logs"
@@ -360,9 +365,9 @@ verify_backup() (
     done < "$BACKUP_DIR/overlay_present.txt"
 )
 
-# Identity is checked before any vehicle mutation. Stock binaries are witnesses,
-# never restore payloads for UNIVERSAL. Legacy backups additionally require the
-# live configuration to be exactly stock or one of our deterministic edits.
+# Identity is checked before any vehicle mutation. Normal UNIVERSAL restore
+# uses stock binaries only as witnesses; manual rescue snapshots and restores
+# them too. Legacy backups require exact binary witnesses and cannot rescue.
 current_train() (
     for rel in /net/rcc/dev/shmem/version.txt /dev/shmem/version.txt /net/mmx/dev/shmem/version.txt; do
         f=$(p "$rel"); [ -r "$f" ] || continue
@@ -402,12 +407,23 @@ verify_backup_identity() (
         }
         key=$(cat "$BACKUP_DIR/vehicle_key.txt")
         if [ -n "$key" ]; then
-            [ "$key" = "$(current_vehicle_key || true)" ] || {
-                say "BACKUP_IDENTITY=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE production_changed=NO"; return 1;
-            }
+            live_key=$(current_vehicle_key || true)
+            if [ -z "$live_key" ]; then
+                say "BACKUP_VEHICLE=WARNING reason=VIN_UNAVAILABLE identity_not_confirmed=YES"
+            elif [ "$key" != "$live_key" ]; then
+                say "BACKUP_VEHICLE=WARNING reason=OTHER_VEHICLE_BACKUP vin_values_logged=NO"
+            fi
         fi
     else
+        if [ "$RESCUE_RESTORE" = 1 ]; then
+            say "BACKUP_IDENTITY=REFUSED reason=RESCUE_FIRMWARE_NOT_RECORDED production_changed=NO"
+            return 1
+        fi
         say "BACKUP_IDENTITY=LEGACY_CONTENT_BINDING train_not_recorded=YES stock_binary_writes=DISABLED"
+    fi
+    if [ "$RESCUE_RESTORE" = 1 ]; then
+        say "BACKUP_IDENTITY=PASS mode=RESCUE firmware=EXACT_MATCH stock_binary_differences=ALLOWED"
+        return 0
     fi
     while IFS= read -r rel; do
         case "$rel" in *.json) continue ;; esac
@@ -452,6 +468,10 @@ verify_config_context() (
 verify_backup_context() (
     verify_backup_identity || return 1
     verify_firewall_backup || { say "FAIL: firewall original backup unavailable or damaged"; return 1; }
+    if [ "$RESCUE_RESTORE" = 1 ]; then
+        say "BACKUP_CONTEXT=PASS mode=RESCUE config_differences=ALLOWED"
+        return 0
+    fi
     verify_config_context "$BACKUP_DIR/files/_mnt_system_etc_eso_production_smartphone_integrator.json" \
         "$BACKUP_DIR/files/_mnt_system_etc_eso_production_dio_manager.json" "$FIREWALL_BACKUP_FILE"
 )
@@ -673,7 +693,16 @@ restore_originals() (
         src="$BACKUP_DIR/files/$(echo "$rel" | tr '/' '_')"; dst=$(p "$rel"); mode=755
         case "$rel" in
           *.json) mode=644 ;;
-          *) say "RESTORE_STOCK_BINARY=SKIP_UNMODIFIED path=$rel"; continue ;;
+          *)
+            if [ "$RESCUE_RESTORE" != 1 ]; then
+                say "RESTORE_STOCK_BINARY=SKIP_UNMODIFIED path=$rel"; continue
+            fi
+            # Binary writes are exclusive to the outer rescue transaction,
+            # which snapshots these exact destinations before setting APPLYING.
+            [ "${ALTS_RESCUE_TRANSACTION_ACTIVE:-0}" = 1 ] || {
+                say "FAIL: rescue binary writes require the transactional entry"; return 1;
+            }
+            say "RESTORE_STOCK_BINARY=RESCUE_PUBLISH path=$rel" ;;
         esac
         stage_and_publish "$src" "$dst" "$mode" || return 1
         same_bytes "$src" "$dst" || return 1
@@ -828,6 +857,10 @@ cmd_restore_precheck(){
 }
 
 cmd_restore(){
+    if [ "$RESCUE_RESTORE" = 1 ] && [ "${ALTS_RESCUE_TRANSACTION_ACTIVE:-0}" != 1 ]; then
+        say "FAIL: rescue restore requires the transactional menu entry; production unchanged"
+        return 1
+    fi
     lock_acquire
     ensure_dirs "$TXN_DIR" || { lock_release; return 1; }
     system_space_snapshot restore_begin
@@ -906,6 +939,10 @@ case "$CMD" in
   start) cmd_start ;;
   status) cmd_status ;;
   snapshot-context) verify_snapshot_context "${2:-}" ;;
+  firmware-train) current_train ;;
+  rescue-precheck)
+    [ "$RESCUE_RESTORE" = 1 ] || { say "FAIL: rescue mode is not enabled"; exit 1; }
+    cmd_restore_precheck ;;
   device-identity) current_device_identity ;;
   vehicle-key) current_vehicle_key ;;
   backup-precheck) cmd_backup_precheck ;;

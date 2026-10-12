@@ -322,6 +322,21 @@ Installing and enabling are now one step, so **only one reboot is needed**:
 2. Wait for the final `RESULT:` line. `RESULT: SUCCESS` means the stock configuration is back; then fully reboot the head unit. Restore stops the display process, releases the Context80 display demand, removes the startup entries, removes this project's HMI JAR, and restores the HMI files and preload configuration saved before installation.
 3. If it shows `RESULT: FAILED`, follow the lines below it; if they say the rollback was incomplete, **do not reboot** and run `RESTORE ORIGINAL` again. A head unit that is already stock shows `RESULT: NOTHING TO RESTORE`.
 
+### 7.1 Rescue restore with a backup from the same model and firmware
+
+Normal `RESTORE ORIGINAL` and the automatic uninstall in INSTALL step 2 check the live files against the stock backup. Differences beyond this project's expected edits are refused. A VIN mismatch now produces a warning that a backup from another vehicle is being used; it does not bypass the normal file checks.
+
+If damaged files prevent normal restore, you can enable rescue mode manually. **Use a complete, clean stock backup from the same head-unit model and the exact same firmware train.** Different regions or trains are not interchangeable, and matching MU numbers alone are insufficient. The script enforces the recorded train; confirm the matching head-unit model before borrowing a backup.
+
+1. Save the current SD card, your own stock backup, and the logs to a separate directory on your computer first. Preserve those original copies.
+2. Use the current Toolbox package. Place the **complete matching backup directory** under `MMI-Cockpit-Carplay/backup/` on the SD card, including `original`, `firewall-original`, `universal-hook-original`, other original subdirectories, and checksum files. Do not copy only selected libraries or JSON files.
+3. Create an empty **file** named **`MMI-Cockpit-Carplay/RESCUE_RESTORE`** on the SD card. It is not a directory and has no `.txt` extension. Enable file-extension visibility in Windows and verify that it is not `RESCUE_RESTORE.txt`.
+4. Insert the SD card, keep power stable, disconnect the phone, and select **`RESTORE ORIGINAL`** in the green menu. The screen shows `RESCUE MODE`. A firmware mismatch, unreadable train, incomplete backup, or checksum failure is refused. **Legacy backups without a recorded firmware train cannot be used for rescue; there is no second override marker.**
+5. Rescue permits overwriting differing system binaries and configurations: `dio_manager`, `libairplay.so`, `libNmeBaseClasses.so`, the two CarPlay JSON configurations, and `pf.conf`. A separate transaction snapshot captures this head unit's current state before writes so a failed restore can roll back. That snapshot is not a new clean stock backup and does not replace either original backup. Earlier interrupted transactions are retained under `install-transaction/rescue-preserved.*` or `restore-transaction/rescue-preserved.*`; they are not used as rescue payloads.
+6. Wait for **`RESULT: RESCUE SUCCESS`**, save the logs, delete **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**, and fully reboot the head unit. On failure, follow the result instructions; the marker's presence does not mean rescue succeeded.
+
+The marker applies to manual restore only. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
+
 ### 8. Upgrade from an older version
 
 Upgrading **no longer needs a manual restore**:

@@ -322,6 +322,21 @@ Script not found:
 2. 等待屏幕出现 `RESULT:` 结论。`RESULT: SUCCESS` 表示已恢复原车配置，然后完整重启车机。恢复会停止显示进程、释放 Context80 显示需求、移除启动项、删除本项目的 HMI JAR，并还原安装前保存的 HMI 文件和 preload 相关配置。
 3. 如果显示 `RESULT: FAILED`，按结论下方的提示操作；若提示 rollback 不完整，**不要重启**，先再次执行 `RESTORE ORIGINAL`。车机本来就是原车状态时会显示 `RESULT: NOTHING TO RESTORE`。
 
+### 7.1 救车模式：用同型号、同固件的备份复原
+
+普通 `RESTORE ORIGINAL` 和 INSTALL 第 2 步的自动卸载会严格检查车机文件与原车备份，文件差异超出本项目的正常改动时会拒绝，避免覆盖其他修改。VIN 不一致只会警告“使用了其他车辆的备份”，不会单凭 VIN 拒绝；普通模式的文件保护仍然有效。
+
+如果车机文件已经损坏，普通复原因文件内容不一致而无法继续，可以手动启用救车模式。**只能使用同型号车机、完整固件版本号完全一致的纯净原车备份**；例如不同地区、不同 train 的备份不能混用，只看 MU 号相同也不够。脚本强制检查备份中记录的固件 train，同型号需要你在借备份前确认。
+
+1. 先完整保存现有 SD 卡、自己的原车备份和日志，放在电脑上另外的目录。不要把这些唯一副本覆盖掉。
+2. 使用当前安装包的 Toolbox。在 SD 卡的 `MMI-Cockpit-Carplay/backup/` 下放入匹配的**完整备份目录**，包括 `original`、`firewall-original`、`universal-hook-original` 等原有子目录与校验文件，不要只挑几个 `.so` 或 JSON 文件。
+3. 在 SD 卡创建一个空文件 **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**。这是文件，不是目录，文件名没有 `.txt` 扩展名；Windows 中请先显示文件扩展名，确认没有建成 `RESCUE_RESTORE.txt`。
+4. 插入 SD 卡，保持稳定供电，断开手机，在绿色菜单选择 **`RESTORE ORIGINAL`**。无需增加绿色菜单选项。屏幕会显示 `RESCUE MODE`；固件版本不一致、版本无法读取、备份缺文件或校验失败时都会拒绝。**没有记录固件版本的旧备份不能用于救车，没有第二个标记可以绕过。**
+5. 救车模式允许覆盖内容不同的系统二进制及配置文件，包括 `dio_manager`、`libairplay.so`、`libNmeBaseClasses.so`、两个 CarPlay 配置 JSON 和 `pf.conf`。写回前会保存本车当前状态的独立事务快照，失败时尝试回滚到救车前状态；这份快照不是新的“纯净原车备份”，不会替换借来的或自己的原车备份。此前中断的事务会保留在 `install-transaction/rescue-preserved.*` 或 `restore-transaction/rescue-preserved.*`，不会作为救车写回数据。
+6. 等待 **`RESULT: RESCUE SUCCESS`**，保存日志，删除 SD 卡上的 **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**，然后完整重启车机。若失败，按界面提示处理；不要因为留下标记就认为已经复原成功。
+
+这个标记只对手动复原生效。**INSTALL 的自动卸载始终使用普通严格检查，即使 SD 卡上有救车标记也不会自动覆盖不匹配的文件。** 救车模式只恢复本项目备份覆盖的文件，不能代替完整固件刷写，也不能保证修复其他系统文件损坏。
+
 ### 8. 从旧版本升级
 
 升级**不需要再手动复原**：

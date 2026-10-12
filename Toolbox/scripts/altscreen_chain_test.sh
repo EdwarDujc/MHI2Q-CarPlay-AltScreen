@@ -555,6 +555,10 @@ route_for_existing(){
 }
 
 route_for_restore(){
+    if [ "${ALTS_RESCUE_RESTORE:-0}" = 1 ] && [ "${ALTS_RESCUE_DISABLED:-0}" != 1 ] &&
+       [ -f "$BACKUP_ROOT/original/COMPLETE" ] && [ -f "$BACKUP_ROOT/universal-hook-original/COMPLETE" ]; then
+        echo UNIVERSAL; return 0
+    fi
     route_for_existing && return 0
 
     # Recovery must not depend only on disposable state markers. If the

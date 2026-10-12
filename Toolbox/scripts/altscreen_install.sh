@@ -1,4 +1,6 @@
 #!/bin/sh
+ALTS_RESCUE_DISABLED=1; ALTS_RESCUE_RESTORE=0
+export ALTS_RESCUE_DISABLED ALTS_RESCUE_RESTORE
 PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
 export PATH
 # MMI-Cockpit-Carplay one-step INSTALL (GEM: INSTALL WITH RGI / INSTALL NO RGI).
@@ -232,8 +234,15 @@ fi
 
 # Recover a pending INSTALL before deciding whether a previous version exists.
 if [ -d "$SD/install-transaction/active" ]; then
-    ALTS_OPLOG_CAPTURED=1 alts_ui_run /bin/sh "$SCRIPTS/altscreen_install_transaction.sh" recover ||
+    if ! ALTS_OPLOG_CAPTURED=1 alts_ui_run /bin/sh "$SCRIPTS/altscreen_install_transaction.sh" recover; then
+        if alts_ui_identity_refused; then
+            finish REFUSED 1 "Backup/transaction identity verification failed." \
+                "No recovery from the rejected snapshot was applied." \
+                "Use the backup for this head unit and firmware." \
+                "Keep both backups and the log."
+        fi
         finish FAILED 1 "Previous install recovery failed." "Do NOT reboot. Keep this SD card and the log."
+    fi
 fi
 if ! alts_ui_run /bin/sh "$SCRIPTS/altscreen_chain_test_universal.sh" backup-precheck; then
     finish FAILED 1 "Stock backup does not match this head unit, or is damaged."         "No previous installation was removed."         "Use this head unit's matching stock backup; keep both backups."

@@ -72,7 +72,7 @@ emit_sd_diagnostics(){
 }
 
 TESTING=${ALTSCREEN_CHAIN_TESTING:-0}
-ROOT=""; VOLUME=""; TXN_READY=0; ROLLING_BACK=0; APP_RW=0; SYS_RW=0; MIXED_RECOVERY=0; PRE_RECOVERY_CHANGED=0
+ROOT=""; VOLUME=""; TXN_READY=0; ROLLING_BACK=0; APP_RW=0; SYS_RW=0; MIXED_RECOVERY=0; PRE_RECOVERY_CHANGED=0; PRE_RECOVERY_PENDING=0
 if [ "$TESTING" = 1 ]; then
   ROOT=${ALTSCREEN_CHAIN_ROOT:-}; VOLUME=${ALTSCREEN_CHAIN_VOLUME:-}
   case "$ROOT" in /tmp/*|/var/tmp/*) ;; *) echo "FAIL: invalid ALTSCREEN_CHAIN_ROOT" >&2; exit 2;; esac
@@ -98,6 +98,12 @@ mount_system_rw(){ [ "$TESTING" = 1 ] || mount -uw /mnt/system; }
 mount_system_ro(){ [ "$TESTING" = 1 ] || mount -ur /mnt/system; }
 
 SD="$VOLUME/MMI-Cockpit-Carplay"; STATE="$SD/state"; BACKUP="$SD/backup"
+RESCUE_RESTORE=0
+if [ "${ALTS_RESCUE_DISABLED:-0}" != 1 ] && [ -f "$SD/RESCUE_RESTORE" ] && [ ! -L "$SD/RESCUE_RESTORE" ]; then
+  RESCUE_RESTORE=1
+fi
+ALTS_RESCUE_RESTORE=$RESCUE_RESTORE
+export ALTS_RESCUE_RESTORE
 TXN="$SD/restore-transaction/active"; LOG="$SD/logs/restore-transaction.log"
 CONTROLLER="$VOLUME/Toolbox/scripts/altscreen_chain_test.sh"
 APPLY="$VOLUME/Toolbox/scripts/altscreen_restore_apply.sh"
@@ -119,15 +125,43 @@ if ! (printf '' >> "$LOG") 2>/dev/null; then
 fi
 exec 3>&1; exec >> "$LOG" 2>&1
 log(){ echo "$*"; echo "$*" >&3; }
+# Stream each step into both journals as it runs. The right side of the pipe
+# returns the command status, so POSIX sh needs neither pipefail nor an SD
+# staging/status file. A killed producer without its terminal record is failure.
 run_detail(){
-  detail_file="$SD/staging-detail.$$"
-  "$@" > "$detail_file" 2>&1
-  detail_rc=$?
-  cat "$detail_file"
-  cat "$detail_file" >&3
-  rm -f "$detail_file" 2>/dev/null || true
-  return "$detail_rc"
+  (
+    "$@" 2>&1
+    detail_rc=$?
+    printf '\nALTS_DETAIL_STATUS_%s=%s\n' "$$" "$detail_rc"
+  ) | (
+    detail_rc=1
+    while IFS= read -r detail_line || [ -n "$detail_line" ]; do
+      case "$detail_line" in
+        "ALTS_DETAIL_STATUS_$$="*) detail_rc=${detail_line#*=} ;;
+        *) printf '%s\n' "$detail_line"; printf '%s\n' "$detail_line" >&3 ;;
+      esac
+    done
+    case "$detail_rc" in ''|*[!0-9]*) detail_rc=1 ;; esac
+    exit "$detail_rc"
+  )
 }
+
+# Preserve details left by older releases; never reap a live operation's file.
+archive_stale_details(){
+  for stale_detail in "$SD"/staging-detail.*; do
+    [ -f "$stale_detail" ] && [ ! -L "$stale_detail" ] || continue
+    stale_pid=${stale_detail##*.}
+    case "$stale_pid" in ''|*[!0-9]*|0|1) continue ;; esac
+    kill -0 "$stale_pid" 2>/dev/null && continue
+    archived_detail="$SD/logs/interrupted-staging-detail.$stale_pid.log"
+    if cat "$stale_detail" >> "$archived_detail" && rm -f "$stale_detail"; then
+      log "INTERRUPTED_STEP_LOG=PRESERVED path=$archived_detail"
+    else
+      log "INTERRUPTED_STEP_LOG=RETAINED path=$stale_detail reason=ARCHIVE_FAILED"
+    fi
+  done
+}
+archive_stale_details
 
 
 size(){ n=$(wc -c < "$1" 2>/dev/null || echo 0); set -- $n; echo "${1:-0}"; }
@@ -322,20 +356,102 @@ verify_dir_snapshot(){
   if [ "$kind" = present ]; then [ -d "$dst" ] && same_dir_exact "$src" "$dst"; else [ ! -e "$dst" ]; fi
 }
 
-# A retained transaction must not roll a different car/firmware back to its
-# saved paths just because both cars use the same absolute production paths.
+# A retained transaction must verify firmware and its saved content before
+# rollback; identical absolute paths alone are not proof of compatibility.
+# FORMAT=4 is a rescue snapshot: firmware binding plus complete snapshots of
+# the three binary destinations. Unlike stock backups, it captures damaged
+# live bytes too, solely to make a failed rescue reversible.
+rescue_role(){
+  case "$1" in
+    /eso/bin/apps/dio_manager|/mnt/app/eso/bin/apps/dio_manager) echo dio ;;
+    /eso/lib/libairplay.so) echo airplay ;;
+    /armle/usr/lib/libNmeBaseClasses.so|/mnt/app/armle/usr/lib/libNmeBaseClasses.so|/eso/lib/libNmeBaseClasses.so) echo nme ;;
+    *) return 1 ;;
+  esac
+}
+prepare_rescue_binaries(){
+  printf '' > "$TXN/meta/rescue.paths" || return 1
+  while IFS= read -r rel; do
+    case "$rel" in *.json) continue ;; esac
+    role=$(rescue_role "$rel") || return 1
+    printf '%s|%s\n' "$role" "$rel" >> "$TXN/meta/rescue.paths" || return 1
+    snap_file "$(p "$rel")" "rescue_$role" || return 1
+  done < "$NATIVE/manifest.txt"
+  cksum < "$TXN/meta/rescue.paths" > "$TXN/meta/rescue.paths.cksum" || return 1
+}
+validate_rescue_binaries(){
+  [ -f "$TXN/meta/rescue.paths" ] && [ -f "$TXN/meta/rescue.paths.cksum" ] &&
+    [ "$(cksum < "$TXN/meta/rescue.paths")" = "$(cat "$TXN/meta/rescue.paths.cksum")" ] || return 1
+  rescue_seen=" "; rescue_count=0
+  while IFS='|' read -r role rel; do
+    [ "$role" = "$(rescue_role "$rel")" ] || return 1
+    case "$role" in dio|airplay|nme) ;; *) return 1 ;; esac
+    case "$rescue_seen" in *" $role "*) return 1 ;; esac
+    rescue_seen="$rescue_seen$role "
+    validate_file_snapshot "rescue_$role" || return 1
+    rescue_count=$((rescue_count + 1))
+  done < "$TXN/meta/rescue.paths"
+  [ "$rescue_count" = 3 ]
+}
+restore_rescue_binaries(){
+  [ "$(cat "$TXN/FORMAT" 2>/dev/null)" = 4 ] || return 0
+  rescue_restore_rc=0
+  while IFS='|' read -r role rel; do
+    restore_file "$(p "$rel")" "rescue_$role" 755 || rescue_restore_rc=1
+  done < "$TXN/meta/rescue.paths"
+  return "$rescue_restore_rc"
+}
+verify_rescue_rollback(){
+  [ "$(cat "$TXN/FORMAT" 2>/dev/null)" = 4 ] || return 0
+  while IFS='|' read -r role rel; do
+    verify_file_snapshot "$(p "$rel")" "rescue_$role" || return 1
+  done < "$TXN/meta/rescue.paths"
+}
+preserve_rescue_history(){
+  for previous_txn in "$INSTALL_TXN" "$TXN"; do
+    [ -d "$previous_txn" ] || continue
+    history_parent=${previous_txn%/*}; history_n=0
+    history="$history_parent/rescue-preserved.$$"
+    while [ -e "$history" ]; do
+      history_n=$((history_n + 1)); history="$history_parent/rescue-preserved.$$.$history_n"
+    done
+    mv "$previous_txn" "$history" || return 1
+    sync || return 1
+    log "RESCUE_TRANSACTION_HISTORY=SAVED path=$history stock_backup_changed=NO"
+  done
+}
+
 snapshot_device_identity(){
   identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
   [ -f "$identity_helper" ] || return 1
-  /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.identity" || return 1
+  if [ "$(cat "$TXN/FORMAT")" = 4 ]; then
+    /bin/sh "$identity_helper" firmware-train > "$TXN/meta/device.identity" || return 1
+  else
+    /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.identity" || return 1
+  fi
   /bin/sh "$identity_helper" vehicle-key > "$TXN/meta/vehicle.key" || printf '' > "$TXN/meta/vehicle.key"
-  cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum > "$TXN/meta/device.cksum" || return 1
+  if [ "$(cat "$TXN/FORMAT")" = 4 ]; then
+    cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" "$TXN/meta/rescue.paths" | cksum > "$TXN/meta/device.cksum" || return 1
+  else
+    cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum > "$TXN/meta/device.cksum" || return 1
+  fi
 }
 validate_device_identity(){
   identity_helper="$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh"
   if [ ! -f "$TXN/meta/device.identity" ] || [ ! -f "$TXN/meta/vehicle.key" ] || [ ! -f "$TXN/meta/device.cksum" ]; then
     log "DEVICE_SNAPSHOT=REFUSED reason=UNBOUND_LEGACY_TRANSACTION recovery_required=YES"
     return 1
+  fi
+  if [ "$(cat "$TXN/FORMAT" 2>/dev/null)" = 4 ]; then
+    [ "$RESCUE_RESTORE" = 1 ] || {
+      log "DEVICE_SNAPSHOT=REFUSED reason=RESCUE_MARKER_REQUIRED recovery_required=YES"; return 1;
+    }
+    validate_rescue_binaries || return 1
+    [ "$(cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" "$TXN/meta/rescue.paths" | cksum)" = "$(cat "$TXN/meta/device.cksum")" ] || return 1
+    [ "$(cat "$TXN/meta/device.identity")" = "$(/bin/sh "$identity_helper" firmware-train)" ] || {
+      log "DEVICE_SNAPSHOT=REFUSED reason=FIRMWARE_MISMATCH recovery_required=YES"; return 1;
+    }
+    return 0
   fi
   [ "$(cat "$TXN/meta/device.identity" "$TXN/meta/vehicle.key" | cksum)" = "$(cat "$TXN/meta/device.cksum")" ] || return 1
   /bin/sh "$identity_helper" device-identity > "$TXN/meta/device.current" &&
@@ -347,10 +463,14 @@ validate_device_identity(){
   rm -f "$TXN/meta/device.current" 2>/dev/null || true
   run_detail /bin/sh "$identity_helper" snapshot-context "$TXN" || return 1
   key=$(cat "$TXN/meta/vehicle.key")
-  [ -z "$key" ] || [ "$key" = "$(/bin/sh "$identity_helper" vehicle-key || true)" ] || {
-    log "DEVICE_SNAPSHOT=REFUSED reason=VEHICLE_MISMATCH_OR_UNAVAILABLE recovery_required=YES"
-    return 1
-  }
+  if [ -n "$key" ]; then
+    live_key=$(/bin/sh "$identity_helper" vehicle-key || true)
+    if [ -z "$live_key" ]; then
+      log "DEVICE_SNAPSHOT_VEHICLE=WARNING reason=VIN_UNAVAILABLE"
+    elif [ "$key" != "$live_key" ]; then
+      log "DEVICE_SNAPSHOT_VEHICLE=WARNING reason=OTHER_VEHICLE_SNAPSHOT vin_values_logged=NO"
+    fi
+  fi
   return 0
 }
 
@@ -376,6 +496,7 @@ validate_restore_snapshot(){
 }
 
 verify_restore_rollback(){
+  verify_rescue_rollback || return 1
   s=$(cat "$TXN/startup.path" 2>/dev/null || true)
   [ -n "$s" ] || return 1
   verify_file_snapshot "$s" startup.sh || return 1
@@ -414,7 +535,12 @@ snapshot(){
   [ ! -e "$STATE/.chain_test.lock" ] || { log "RESTORE=REFUSED reason=CHAIN_LOCK_PRESENT_AFTER_PRECHECK production_changed=NO"; return 1; }
   rm -rf "$TXN" 2>/dev/null || return 1
   ensure_dirs "$TXN/files" "$TXN/dirs" "$TXN/meta" || return 1
-  printf '%s\n' 3 > "$TXN/FORMAT" || return 1
+  if [ "$RESCUE_RESTORE" = 1 ]; then
+    printf '%s\n' 4 > "$TXN/FORMAT" || return 1
+    prepare_rescue_binaries || return 1
+  else
+    printf '%s\n' 3 > "$TXN/FORMAT" || return 1
+  fi
   snapshot_device_identity || return 1
   STARTUP=$(find_startup) || return 1
   echo "$STARTUP" > "$TXN/startup.path" || return 1
@@ -467,6 +593,7 @@ rollback(){
     restore_file "$PF" pf.conf 644 || r=1
   fi
   if [ "$APP_RW" = 1 ]; then
+    restore_rescue_binaries || r=1
     restore_file "$JAR" carplay_hook.jar 644 || r=1
     rm -f "$JAR.basevideo3.tmp" "$JAR.basevideo3.restore.tmp" 2>/dev/null || r=1
     restore_file "$LEGACY_HOOK" legacy_hook 755 || r=1
@@ -527,7 +654,9 @@ fail(){
     rollback && log "RESTORE=ABORTED rollback=PASS runtime_stopped=YES reboot_required=YES" ||
       log "RESTORE=FAILED rollback=INCOMPLETE recovery_required=YES"
   elif [ "$PRE_RECOVERY_CHANGED" = 1 ]; then
-    log "RESTORE=REFUSED production_changed=RECOVERY_ONLY current_restore_mutation=NO"
+    log "RESTORE=REFUSED production_changed=RECOVERY_ONLY current_restore_mutation=NO reboot_required=YES"
+  elif [ "$PRE_RECOVERY_PENDING" = 1 ]; then
+    log "RESTORE=REFUSED production_changed=UNKNOWN_RECOVERY current_restore_mutation=NO"
   else
     log "RESTORE=REFUSED production_changed=NO"
   fi
@@ -536,12 +665,33 @@ fail(){
 trap 'fail "restore interrupted by signal"' 1 2 15
 
 log "===== V3 transactional RESTORE ORIGINAL started ====="
+if [ "$RESCUE_RESTORE" = 1 ]; then
+  log "@@UI RESCUE MODE: stock binaries and configurations will be restored."
+  log "RESCUE_RESTORE=ENABLED marker=$SD/RESCUE_RESTORE firmware_match=REQUIRED"
+  run_detail /bin/sh "$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh" rescue-precheck ||
+    fail "rescue backup incomplete or firmware does not match"
+  # Rescue uses a fresh snapshot of this head unit, never a borrowed or damaged
+  # old transaction. Keep those old transactions as diagnostics, not payloads.
+  preserve_rescue_history || fail "cannot preserve previous transaction history"
+fi
 if [ -d "$INSTALL_TXN" ]; then
   [ -f "$INSTALL_TXN_HELPER" ] || fail "active install transaction exists but recovery helper is missing"
   log "ACTIVE_INSTALL_TRANSACTION=DETECTED action=ROLLBACK_PRE_INSTALL_BEFORE_RESTORE"
-  PRE_RECOVERY_CHANGED=1
+  # Terminal/incomplete SD-only snapshots are cleanup, not vehicle recovery.
+  # An attempted recovery that fails is not proof of changed vehicle files.
+  if [ -f "$INSTALL_TXN/PREPARED" ] &&
+     { [ -f "$INSTALL_TXN/ROLLBACK_INCOMPLETE" ] ||
+       { [ ! -f "$INSTALL_TXN/COMMITTED" ] && [ ! -f "$INSTALL_TXN/ROLLED_BACK" ]; }; }; then
+    PRE_RECOVERY_PENDING=1
+  fi
   run_detail /bin/sh "$INSTALL_TXN_HELPER" recover || fail "active install transaction could not be recovered before restore"
-  log "PRE_RESTORE_RECOVERY=PASS kind=INSTALL_TRANSACTION production_changed=RECOVERY_TO_PRE_INSTALL"
+  if [ "$PRE_RECOVERY_PENDING" = 1 ]; then
+    PRE_RECOVERY_CHANGED=1
+    log "PRE_RESTORE_RECOVERY=PASS kind=INSTALL_TRANSACTION production_changed=RECOVERY_TO_PRE_INSTALL reboot_required=YES"
+  else
+    log "PRE_RESTORE_RECOVERY=PASS kind=INSTALL_TRANSACTION production_changed=NO"
+  fi
+  PRE_RECOVERY_PENDING=0
 fi
 recover_stale || fail "previous restore transaction could not be recovered"
 [ -f "$CONTROLLER" ] && [ -f "$APPLY" ] || fail "restore controller/apply helper missing"
@@ -555,10 +705,20 @@ case "$ALTS_PREVIOUS" in
     if [ ! -e "$LEGACY_HOOK" ] && [ ! -e "$STAGE" ] && [ ! -e "$PREV" ] &&
        ! grep -Eq '"0x520[0-4]"' "$DIO" 2>/dev/null &&
        ! grep -Eq 'ALTSCREEN|ALT111' "$PF" 2>/dev/null; then
-      rm -f "$STATE/INSTALLED" "$STATE/firmware_profile.txt" "$STATE/run_id" "$STATE/session_path" 2>/dev/null || true
-      log "RESTORE=NOTHING_TO_RESTORE production_changed=NO"
-      trap - 1 2 15
-      exit 0
+      if [ "$RESCUE_RESTORE" = 1 ]; then
+        : # Even a clean-looking head unit needs its binary/config rescue applied.
+      else
+        rm -f "$STATE/INSTALLED" "$STATE/firmware_profile.txt" "$STATE/run_id" "$STATE/session_path" 2>/dev/null || true
+        if [ "$PRE_RECOVERY_CHANGED" = 1 ]; then
+          log "RESTORE=RECOVERED_TO_STOCK production_changed=RECOVERY_ONLY reboot_required=YES"
+        else
+          log "RESTORE=NOTHING_TO_RESTORE production_changed=NO"
+        fi
+      fi
+      if [ "$RESCUE_RESTORE" != 1 ]; then
+        trap - 1 2 15
+        exit 0
+      fi
     fi ;;
 esac
 preflight_startup || fail "startup restore preflight failed"
@@ -567,10 +727,11 @@ log "RESTORE_PREFLIGHT=PASS hmi=PROJECT_OWNED_DELETE startup=SAFE native_runtime
 detect_mixed_restore_state
 snapshot || { rm -rf "$TXN" 2>/dev/null || true; fail "pre-restore transaction snapshot failed"; }
 touch "$TXN/APPLYING" || fail "cannot mark transaction APPLYING"
-run_detail /bin/sh "$APPLY" || fail "restore APPLY step failed"
+ALTS_RESCUE_TRANSACTION_ACTIVE=$RESCUE_RESTORE run_detail /bin/sh "$APPLY" || fail "restore APPLY step failed"
 
 # Re-verify every file in the trusted native original manifest, not only the
-# two JSONs. UNIVERSAL verifies unchanged stock binaries without writing them.
+# two JSONs. Normal restore leaves stock binaries untouched; rescue verifies
+# the explicitly restored binaries against the same complete backup.
 [ -f "$NATIVE/manifest.txt" ] || fail "native original manifest missing after restore"
 NATIVE_COUNT=0
 while IFS= read -r rel; do
@@ -643,6 +804,9 @@ if [ "$MIXED_RECOVERY" = 1 ]; then
   log "RESTORE_MIXED_STATE_RECOVERY=PASS trusted_backups=YES runtime=ABSENT preload=REMOVED"
 fi
 log "RESTORE_VERIFY=PASS"
+if [ "$RESCUE_RESTORE" = 1 ]; then
+  log "RESCUE_RESTORE=PASS stock_binaries=VERIFIED stock_configs=VERIFIED remove_marker_after_success=YES"
+fi
 log "RESTORE=PASS transaction=COMMITTED persistent_state=PRE_INSTALL reboot_required=YES"
 log "IMPORTANT=DO_NOT_TEST_CARPLAY_BEFORE_FULL_MMI_REBOOT"
 rm -rf "$TXN" 2>/dev/null || log "WARN: committed transaction retained; next run will clean it"
