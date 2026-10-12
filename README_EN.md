@@ -1,4 +1,4 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix3
+# MIB2 Toolbox — CarPlay AltScreen V3.7Fix4
 
 **English** | [简体中文](README.md)
 
@@ -6,7 +6,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 **V3.7 update: full RGI navigation-data integration is now available (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)), color conversion for the secondary display now runs on the GPU, cutting whole-system CPU usage from about 80% to about 20%, the runtime watermark has been removed, and starting with V3.7 the whole project is open source under GPL-3.0.**
 
-**V3.7Fix3 update: `INSTALL WITH RGI` / `INSTALL NO RGI` now install and enable in one step with a single reboot, removing an old version automatically; fixes the false `Another INSTALL / RESTORE is still running` error during install; fixes race conditions between secondary-display connect and exit, and requests recovery automatically when no new frames arrive for a long time; adds safe-area detection for the Q7 cluster layout.**
+**V3.7Fix4 update: fixes the map offset in the Q7 Sport cluster small view; more robust fast reconnect, disconnect cleanup, and stream recovery, with automatic RGI recovery after failures; the stock backup is now bound to the firmware version so a backup from other firmware cannot be applied by mistake; adds a manual [rescue restore mode](#71-rescue-restore-with-a-backup-from-the-same-model-and-firmware).**
 
 > [!NOTE]
 > **Sister project: MMI Mirror**  
@@ -263,7 +263,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   Check that the menu header shows **`Version: V3.7Fix3`**. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
+   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7Fix4`**). If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
 
 5. If you still see:
 
@@ -335,7 +335,7 @@ If damaged files prevent normal restore, you can enable rescue mode manually. **
 5. Rescue permits overwriting differing system binaries and configurations: `dio_manager`, `libairplay.so`, `libNmeBaseClasses.so`, the two CarPlay JSON configurations, and `pf.conf`. A separate transaction snapshot captures this head unit's current state before writes so a failed restore can roll back. That snapshot is not a new clean stock backup and does not replace either original backup. Earlier interrupted transactions are retained under `install-transaction/rescue-preserved.*` or `restore-transaction/rescue-preserved.*`; they are not used as rescue payloads.
 6. Wait for **`RESULT: RESCUE SUCCESS`**, save the logs, delete **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**, and fully reboot the head unit. On failure, follow the result instructions; the marker's presence does not mean rescue succeeded.
 
-The marker applies to manual restore only. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
+The marker applies to manual restore only, meaning `RESTORE ORIGINAL` and `STORE LOGS + RESTORE`. While the marker is present, every later manual restore runs in rescue mode, so always delete it once the rescue is done. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
 
 ### 8. Upgrade from an older version
 
@@ -388,7 +388,7 @@ Current recommended version:
 
 ~~~text
 main
-└── AUG22 / V3.7Fix3
+└── AUG22 / V3.7Fix4
     ├── China-region (CN) firmware: vehicle-tested and working
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
 ~~~
@@ -396,6 +396,18 @@ main
 The current public release prioritizes stable installation, normal use, and reliable recovery.
 
 ### Changelog
+
+**V3.7Fix4**
+
+- Fixed the display process recognizing only the B9 cluster layout; in the Q7 / Q5 FY Sport small view the map position now matches the safe area.
+- Stronger secondary-display session lifecycle: stopUI is sent before disconnecting, and a new session is no longer affected by an old session's cleanup during fast reconnects or wired/wireless switches; if a stock command stalls, disconnect cleanup finishes in the background instead of blocking the stock flow.
+- Retries for stream recovery, view-area changes, and firewall rules are now spaced and bounded; a failed firewall cleanup is retried in the background so no stale pass rule is left on the head unit.
+- RGI threads (presentation, renderer connection, data bus) are rebuilt automatically after an unexpected exit; when the stock navigation service is replaced, the gate is reinstalled and stock navigation data is replayed; a renderer that fails at cold boot is retried after a cooldown instead of being abandoned for the whole boot.
+- All log files are size-capped and no longer grow without limit on the RAM disk; timers use a clock that is not affected by system-time jumps.
+- The stock backup records the firmware version: install and restore are refused on a firmware mismatch, and restore writes back only files this project actually changed; a VIN mismatch or an unreadable VIN only produces a warning.
+- A failed rollback is now reported truthfully instead of as success; after an interrupted install, the next INSTALL or RESTORE recovers automatically; the pre-install check covers all runtime files; failure results give more accurate advice.
+- Added a manual rescue restore mode; see section 7.1.
+- The green-menu entry name is `MMI-Cockpit-Carplay` again, and the version label is `V3.7Fix4`.
 
 **V3.7Fix3**
 
