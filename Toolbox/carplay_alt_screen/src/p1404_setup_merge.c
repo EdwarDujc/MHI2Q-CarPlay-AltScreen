@@ -154,3 +154,48 @@ out:
     if (merged) o->release(merged);
     return ok;
 }
+
+alt_setup_obj alt_setup_filter_teardown_types(const struct alt_setup_cf_ops *o,
+                                              alt_setup_obj request,
+                                              const unsigned char stale[256]) {
+    const void *keys[ALT_SETUP_ROOT_MAX], *vals[ALT_SETUP_ROOT_MAX];
+    alt_setup_obj key = NULL, streams, array = NULL, copy = NULL, result = NULL;
+    unsigned roots, n, i, kept = 0;
+    if (!ops_ready(o) || !stale || !request || !o->is_dict(request)) return NULL;
+    roots = o->dict_count(request);
+    if (!roots || roots > ALT_SETUP_ROOT_MAX) return NULL;
+    memset(keys, 0, sizeof(keys)); memset(vals, 0, sizeof(vals));
+    o->dict_get_keys_values(request, keys, vals);
+    key = o->string_new("streams", -1);
+    if (!key) goto out;
+    streams = (alt_setup_obj)o->dict_get(request, key);
+    if (!streams || !o->is_array(streams)) goto out;
+    n = o->array_count(streams);
+    if (!n || n > 128u) goto out;
+    array = o->array_create_mutable(NULL, 0, NULL, NULL);
+    copy = o->dict_create_mutable(NULL, 0, NULL, NULL, NULL);
+    if (!array || !copy) goto out;
+    for (i = 0; i < roots; ++i) {
+        if (!keys[i] || !vals[i]) goto out;
+        o->dict_set(copy, keys[i], vals[i]);
+        if (o->dict_get(copy, keys[i]) != vals[i]) goto out;
+    }
+    for (i = 0; i < n; ++i) {
+        alt_setup_obj item = (alt_setup_obj)o->array_at(streams, i);
+        uint32_t type;
+        if (!object_stream_type(o, item, &type) || type >= 256u) goto out;
+        if (!stale[type]) {
+            o->array_append(array, item);
+            if (o->array_count(array) != ++kept || o->array_at(array, kept - 1u) != item) goto out;
+        }
+    }
+    if (!kept) goto out;
+    o->dict_set(copy, key, array);
+    if (o->dict_get(copy, key) != array) goto out;
+    result = copy; copy = NULL;
+out:
+    if (key) o->release(key);
+    if (array) o->release(array);
+    if (copy) o->release(copy);
+    return result;
+}

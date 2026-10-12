@@ -59,4 +59,11 @@ int alt_setup_merge_private_response(const struct alt_setup_cf_ops *ops,
                                      alt_setup_obj private_stream_response,
                                      uint32_t alt_stream_type);
 
+/* Remove an audio teardown type mask in one pass, preserving up to 128 original
+ * stream descriptors and all root fields. Refuse an empty result (stock treats
+ * that as full teardown). Caller owns the returned shallow dictionary clone. */
+alt_setup_obj alt_setup_filter_teardown_types(const struct alt_setup_cf_ops *,
+                                              alt_setup_obj request,
+                                              const unsigned char stale[256]);
+
 #endif

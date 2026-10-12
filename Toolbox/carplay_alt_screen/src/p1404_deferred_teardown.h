@@ -40,7 +40,7 @@ static void *fullchain_deferred_teardown_worker(void *arg) {
             int filter = job->audio_epochs_valid ? fullchain_audio_filter(job->params, &lease, job->audio_epochs, &request, &owned) : 1;
             if (filter == 1) finished = fullchain_teardown_admitted(job->receiver, request, job->reason, &done, &lease);
             else {
-                finished = filter == 2;
+                finished = filter == 2 || filter == 3;
                 fullchain_lifecycle_leave(job->receiver, &lease, 0);
             }
             if (owned) alt_airplay_release_object(owned);

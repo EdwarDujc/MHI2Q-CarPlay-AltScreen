@@ -170,7 +170,7 @@ static int fullchain_teardown_admitted(void *session, const void *params,
                 if (!filter && lease->operation != ALT_SESSION_DEFERRED_TEARDOWN)
                     fullchain_retry_cleanup(session, params, reason, lease);
                 fullchain_lifecycle_leave(session, lease, 0);
-                return filter == 2;
+                return filter == 2 || filter == 3;
             }
             params = request;
         }
@@ -611,7 +611,8 @@ static int fullchain_private_setup_result(int stock_rc, int split,
     return stock_rc;
 }
 
-static int fullchain_session_setup(void *session, const void *params, void **out_params) {
+static int fullchain_session_setup(void *session, const void *params, void **out_params,
+                                   struct alt_session_lease *lease) {
     int r, wants_alt = 0;
     int prep_rc = ALT111_PREP_PASSTHROUGH;
     int private_rc = ALT111_FINISH_NO_ALT;
@@ -636,8 +637,11 @@ static int fullchain_session_setup(void *session, const void *params, void **out
         real_session_setup = (setup_fn)p1404_direct_stock_symbol_named("AirPlayReceiverSessionSetup");
     if (!real_session_setup) return -1;
     if (!alt_runtime_negotiation_ready("session-setup") ||
-        !p1404_identity_ok)
-        return real_session_setup(session, params, out_params);
+        !p1404_identity_ok) {
+        r = real_session_setup(session, params, out_params);
+        if (r == 0) fullchain_note_setup_epochs(params, lease);
+        return r;
+    }
 
     alt_desc = (cf_obj)alt_find_stream_descriptor((void *)params, CP_STREAM_ALT_SCREEN);
     alt_desc_count = fullchain_count_stream_descriptors((cf_obj)params, CP_STREAM_ALT_SCREEN);
@@ -696,6 +700,10 @@ static int fullchain_session_setup(void *session, const void *params, void **out
         altscreen_log("PHASE=SETUP_STOCK_REQUEST strategy=passthrough_or_split_failed params=%p", stock_params);
 
     r = real_session_setup(session, stock_params, out_params);
+    /* Commit only the streams that stock successfully set up, while the
+     * lifecycle lease still excludes teardown. A private111 response failure
+     * must not hide a successful stock audio replacement in a mixed request. */
+    if (r == 0) fullchain_note_setup_epochs(stock_params, lease);
     alt_private111_release_prepared(stock_params, stock_owned);
     obs_call("SessionSetup", session, lr, (long)r);
 
@@ -808,8 +816,7 @@ int AirPlayReceiverSessionSetup(void *session, const void *params, void **out_pa
         fullchain_lifecycle_leave(session, &lease, 0);
         return -6752;
     }
-    fullchain_note_setup_epochs(params, &lease);
-    rc = fullchain_session_setup(session, params, out_params);
+    rc = fullchain_session_setup(session, params, out_params, &lease);
     fullchain_lifecycle_leave(session, &lease, 0);
     return rc;
 }

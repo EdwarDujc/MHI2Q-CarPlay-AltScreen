@@ -38,8 +38,12 @@ static int fullchain_audio_snapshot(const void *params, struct alt_session_lease
     return 1;
 }
 /* Return 1 with original/filtered request, 2 if all requested streams have been
- * superseded, 0 if filtering cannot safely preserve the original request. Never
+ * superseded, 3 for a terminal rejection if safe filtering is unavailable. Never
  * hand stock an empty streams array: it means FULL teardown, not a no-op. */
+static int fullchain_audio_filter_refused(struct alt_session_lease *lease, const char *reason) {
+    altscreen_log("ERROR PHASE=TEARDOWN_AUDIO_FILTER_REFUSED receiver_slot=%u reason=%s retry=0 original_request_not_forwarded=1 new_streams_preserved=1 old_streams_full_teardown_required=1", lease->slot, reason);
+    return 3;
+}
 static int fullchain_audio_filter(const void *params, struct alt_session_lease *lease,
                                  const uint32_t saved[256], const void **filtered,
                                  void **owned) {
@@ -47,35 +51,26 @@ static int fullchain_audio_filter(const void *params, struct alt_session_lease *
     unsigned char stale[256] = {0};
     unsigned i, n, removed = 0;
     cf_obj streams = cf_dict_get_cstr((cf_obj)params, "streams");
-    cf_obj current = (cf_obj)params;
     struct alt_setup_cf_ops ops;
     *filtered = params; *owned = NULL;
-    if (!alt_session_guard_copy_stream_epochs(lease, now) || !streams || !alt_cf_is_array(streams)) return 0;
+    if (!alt_session_guard_copy_stream_epochs(lease, now) || !streams || !alt_cf_is_array(streams))
+        return fullchain_audio_filter_refused(lease, "invalid_snapshot");
     n = cf_array_count(streams);
+    if (!n || n > 128u) return fullchain_audio_filter_refused(lease, "stream_limit");
     for (i = 0; i < n; ++i) {
         int64_t type;
         cf_obj item = (cf_obj)cf_array_at(streams, i);
-        if (!alt_cf_int64(cf_dict_get_cstr(item, "type"), &type) || type < 0 || type >= 256) return 0;
+        if (!alt_cf_int64(cf_dict_get_cstr(item, "type"), &type) || type < 0 || type >= 256)
+            return fullchain_audio_filter_refused(lease, "invalid_type");
         if (saved[type] != now[type]) { stale[type] = 1; ++removed; }
     }
     if (!removed) return 1;
     altscreen_log("PHASE=TEARDOWN_AUDIO_GENERATION receiver_slot=%u superseded=%u requested=%u new_streams_preserved=1", lease->slot, removed, n);
     if (removed == n) return 2;
-    if (!setup_ops_ready(&ops)) return 0;
-    for (i = 0; i < 256; ++i) if (stale[i]) {
-        alt_setup_obj ignored;
-        unsigned count;
-        void *copy = alt_setup_build_stock_only(&ops, (alt_setup_obj)current, i, &ignored, &count);
-        if (!copy || !count) {
-            if (copy) alt_airplay_release_object(copy);
-            if (*owned) alt_airplay_release_object(*owned);
-            *owned = NULL;
-            return 0;
-        }
-        if (*owned) alt_airplay_release_object(*owned);
-        *owned = copy; current = copy;
-    }
-    *filtered = current;
+    if (!setup_ops_ready(&ops)) return fullchain_audio_filter_refused(lease, "cf_ops_unavailable");
+    *owned = alt_setup_filter_teardown_types(&ops, (alt_setup_obj)params, stale);
+    if (!*owned) return fullchain_audio_filter_refused(lease, "copy_failed");
+    *filtered = *owned;
     return 1;
 }
 #endif
