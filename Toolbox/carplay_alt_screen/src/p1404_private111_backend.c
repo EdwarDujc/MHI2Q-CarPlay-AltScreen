@@ -400,7 +400,9 @@ static int build_stream111_response(const void *alt_descriptor,
     return 1;
 }
 
-static int open_stock_equivalent_listener(void *receiver, uint16_t *port_out, int *fd_out) {
+/* requested_port 0 asks the stock helper for an ephemeral port. */
+static int open_stock_equivalent_listener(void *receiver, int requested_port,
+                                          uint16_t *port_out, int *fd_out) {
     int port = 0, fd = -1, rc, af;
     if (port_out) *port_out = 0;
     if (fd_out) *fd_out = -1;
@@ -408,9 +410,9 @@ static int open_stock_equivalent_listener(void *receiver, uint16_t *port_out, in
     af = ((const uint8_t *)receiver)[RECEIVER_PEER_FAMILY_OFF];
 
     rc = be.server_socket_open(af, P1404_SOCK_STREAM, P1404_IPPROTO_TCP,
-                               0, &port, ALT111_RECEIVE_BUFFER_BYTES, &fd);
-    altscreen_log("PHASE=STREAM_111_LISTENER_OPEN_RETURN rc=%d requested_port=0 bound_port=%d advertised_port=%d fd=%d helper=ServerSocketOpen recvbuf=%d af=%d",
-                  rc, port, port, fd, ALT111_RECEIVE_BUFFER_BYTES, af);
+                               requested_port, &port, ALT111_RECEIVE_BUFFER_BYTES, &fd);
+    altscreen_log("PHASE=STREAM_111_LISTENER_OPEN_RETURN rc=%d requested_port=%d bound_port=%d advertised_port=%d fd=%d helper=ServerSocketOpen recvbuf=%d af=%d",
+                  rc, requested_port, port, port, fd, ALT111_RECEIVE_BUFFER_BYTES, af);
     if (rc != 0 || fd < 0 || port <= 0 || port > 65535) {
         if (fd >= 0 && be.close_fn) be.close_fn(fd);
         return 0;
@@ -568,6 +570,43 @@ static int backend_runtime_prereqs_ready(void) {
            be.socket_fn && be.connect_fn && be.close_fn;
 }
 
+/* Prefer the installer's static pf.conf ports: the stock DHCP path reloads
+ * pf.conf and silently drops any runtime rule, cutting the live stream. A busy
+ * or foreign-owned fixed port moves to the next one; after the last, the
+ * original ephemeral port with its exact runtime rule remains the fallback. */
+static int open_listener_with_firewall(void *receiver, void *session,
+                                       uint16_t *port_out, int *fd_out,
+                                       struct p1404_pf_lease *firewall) {
+    unsigned i;
+    for (i = 0; i <= P1404_ALT111_STATIC_PORT_COUNT; ++i) {
+        int requested = i < P1404_ALT111_STATIC_PORT_COUNT ?
+                        (int)(P1404_ALT111_STATIC_PORT_FIRST + i) : 0;
+        int conflict = 0, firewall_errno, fd = -1;
+        uint16_t port = 0;
+        if (!open_stock_equivalent_listener(receiver, requested, &port, &fd)) {
+            if (requested) continue;
+            return 0;
+        }
+        /* The helper may answer a fixed request with an ephemeral port. */
+        if (requested && port != (uint16_t)requested) requested = 0;
+        if (p1404_alt111_firewall_open_owned_ex(port, firewall, &conflict)) {
+            altscreen_log("PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=OK scope=%s before_response=1",
+                          receiver, session, (unsigned)port,
+                          requested ? "carplay0_tcp_fixed_port" : "carplay0_tcp_exact_port");
+            *port_out = port;
+            *fd_out = fd;
+            return 1;
+        }
+        firewall_errno = errno;
+        altscreen_log("ERROR PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=FAILED errno=%d ownership_conflict=%d response_advertised=0 next=%s",
+                      receiver, session, (unsigned)port, firewall_errno, conflict,
+                      requested && conflict ? "next_port" : "fail_closed");
+        if (be.close_fn) be.close_fn(fd);
+        if (!requested || !conflict) return 0;
+    }
+    return 0;
+}
+
 static int prepare_setup(void *receiver,
                          const void *alt_descriptor,
                          void **alt_screen_session,
@@ -594,16 +633,9 @@ static int prepare_setup(void *receiver,
 
     if (!prepare_start_context(receiver, session, alt_descriptor, &connection_id))
         goto fail_local;
-    if (!open_stock_equivalent_listener(receiver, &port, &listen_fd)) goto fail_local;
-    if (!p1404_alt111_firewall_open_owned(port, &firewall)) {
-        int firewall_errno = errno;
-        altscreen_log("ERROR PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=FAILED errno=%d response_advertised=0 fail_closed=1",
-                      receiver, session, (unsigned)port, firewall_errno);
+    if (!open_listener_with_firewall(receiver, session, &port, &listen_fd, &firewall))
         goto fail_local;
-    }
     firewall_open = 1;
-    altscreen_log("PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=OK scope=carplay0_tcp_exact_port before_response=1",
-                  receiver, session, (unsigned)port);
     if (!build_stream111_response(alt_descriptor, port, &response)) goto fail_local;
 
     if (!pair_install(receiver, session, listen_fd, port, connection_id, &firewall)) {
