@@ -28,7 +28,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 >
 > This is not a demonstration build. The current CarPlay AltScreen functionality is already usable in a real vehicle.
 >
-> This project was originally developed around our own vehicles and day-to-day use cases. **China-region (CN) AUG22 firmware has been tested in a vehicle and works normally.** AUG22 firmware for US / ER and other regions may have unknown bugs and is **not guaranteed to work 100%**; assess the risk yourself and keep your stock backup. The MHI2 platform is not supported. Do not bypass the installer's firmware checks to force installation.
+> This project was originally developed around our own vehicles and day-to-day use cases. **China-region (CN) AUG22 firmware has been tested in a vehicle and works normally.** Some European-region (ER) AUG22 firmware has been reported working in vehicles by users (for example `MHI2Q_ER_AUG22_P5092` / `P5152`, MU 1329). Other ER versions and firmware for US and other regions may have unknown bugs and are **not guaranteed to work 100%**; assess the risk yourself and keep your stock backup. The MHI2 platform is not supported. Do not bypass the installer's firmware checks to force installation.
 >
 > **Shared free of charge.** The source and installation packages are available for free on GitHub; do not pay for them.
 >
@@ -73,7 +73,8 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 | Platform | **MHI2Q** only; MHI2 is not supported |
 | Firmware version | **AUG22**; the installer checks the head unit's firmware version and refuses anything other than AUG22 |
 | China-region (CN) firmware | ✅ Vehicle-tested and works normally |
-| US / ER and other regional firmware | ⚠️ May have unknown bugs; not guaranteed to work 100% |
+| Some European-region (ER) firmware | ✅ Reported working in vehicles by users (for example `MHI2Q_ER_AUG22_P5092` / `P5152`, MU 1329) |
+| Other ER versions, US and other regional firmware | ⚠️ May have unknown bugs; not guaranteed to work 100% |
 | iPhone iOS version | ✅ **iOS 26** recommended; ⚠️ below iOS 18, Baidu Maps may not support the cluster display and Amap (Gaode) may show the map with the wrong aspect ratio |
 
 > [!TIP]
@@ -390,6 +391,7 @@ Current recommended version:
 main
 └── AUG22 / V3.7Fix4
     ├── China-region (CN) firmware: vehicle-tested and working
+    ├── Some European-region (ER) firmware: reported working by users (P5092 / P5152, MU 1329)
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
 ~~~
 
