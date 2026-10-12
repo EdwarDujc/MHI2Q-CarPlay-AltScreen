@@ -333,12 +333,29 @@ flat_log_event() {
     flat_plain_append "$flat_event" "$FLAT_DEST/boot.log" 2>/dev/null || true
     rm -f "$flat_event"
 }
+flat_reserve_destination() {
+    # An uncalibrated clock and reused PID can repeat across cold boots. Never
+    # append to an existing capture: reserve a fresh SD directory atomically.
+    flat_boot_parent=$1; flat_boot_stem=$2; flat_boot_suffix=0
+    ensure_dirs "$flat_boot_parent" 2>/dev/null || return 1
+    while [ "$flat_boot_suffix" -lt 10000 ]; do
+        BOOT_ID=$flat_boot_stem
+        [ "$flat_boot_suffix" -eq 0 ] || BOOT_ID="${flat_boot_stem}_$flat_boot_suffix"
+        FLAT_DEST="$flat_boot_parent/$BOOT_ID"
+        if mkdir "$FLAT_DEST" 2>/dev/null; then return 0; fi
+        # Stop on removed/read-only storage rather than spinning indefinitely.
+        [ -e "$FLAT_DEST" ] || return 1
+        flat_boot_suffix=$((flat_boot_suffix + 1))
+    done
+    return 1
+}
 run_flat_plaintext() {
     VOLUME=$1
-    BOOT_ID="boot_$(date +%Y%m%d_%H%M%S)_$$"
-    FLAT_DEST="$VOLUME/MMI-Cockpit-Carplay/logs/boots/$BOOT_ID"
+    if ! flat_reserve_destination "$VOLUME/MMI-Cockpit-Carplay/logs/boots" "boot_$(date +%Y%m%d_%H%M%S)_$$"; then
+        return 1
+    fi
     FLAT_PREFIX="$ROOT/tmp/altscreen_diag_$$"
-    ensure_dirs "$FLAT_DEST/streams" 2>/dev/null || return 0
+    ensure_dirs "$FLAT_DEST/streams" 2>/dev/null || return 1
 
     # Cursor state is volatile and published on a filesystem with rename. It survives only an
     # observer-process restart in the current boot, so a real reboot starts at
@@ -549,8 +566,10 @@ while [ -f "$ENABLED" ]; do
             wait "$storage_timer" 2>/dev/null || true
         fi
         if ensure_dirs "$storage_volume/MMI-Cockpit-Carplay/logs/boots" 2>/dev/null; then
-            run_flat_plaintext "$storage_volume"
-            exit 0
+            if run_flat_plaintext "$storage_volume"; then exit 0; fi
+            if [ $((storage_wait % 30)) -eq 0 ]; then
+                echo "CAPTURE_DESTINATION_UNAVAILABLE volume=$storage_volume"
+            fi
         fi
     fi
     # No SD is an idle state, not a reason to fill the shared-memory disk.
