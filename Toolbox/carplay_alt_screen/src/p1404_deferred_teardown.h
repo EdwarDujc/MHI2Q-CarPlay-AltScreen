@@ -1,4 +1,5 @@
 #include "p1404_lock_wait.h"
+#include <stdlib.h>
 /* Included after fullchain_teardown_admitted. Each task holds the receiver,
  * request and a guard reservation until cleanup, so timeout cannot lose the
  * request or forget that another full teardown already completed. */
@@ -9,6 +10,9 @@ struct fullchain_deferred_teardown {
     void *receiver;
     const void *params;
     int reason, full;
+    int dynamic, thread_started;
+    uint64_t last_start_ms;
+    struct fullchain_deferred_teardown *next;
     volatile int ready;
     struct alt_session_lease fence;
     int audio_epochs_valid;
@@ -16,12 +20,43 @@ struct fullchain_deferred_teardown {
 };
 static struct fullchain_deferred_teardown deferred_teardowns[ALT_DEFERRED_TEARDOWN_SLOTS];
 static volatile unsigned deferred_teardown_lock;
+static struct fullchain_deferred_teardown *deferred_overflow;
 
 static void deferred_teardown_acquire(void) {
     while (__sync_lock_test_and_set(&deferred_teardown_lock, 1u)) p1404_lock_wait_yield();
 }
 static void deferred_teardown_release(void) {
     __sync_lock_release(&deferred_teardown_lock);
+}
+
+static uint64_t deferred_now_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * 1000u + ts.tv_nsec / 1000000u;
+}
+static void deferred_discard(struct fullchain_deferred_teardown *job) {
+    int dynamic = job->dynamic;
+    deferred_teardown_acquire();
+    if (dynamic) {
+        struct fullchain_deferred_teardown **p = &deferred_overflow;
+        while (*p && *p != job) p = &(*p)->next;
+        if (*p) *p = job->next;
+    } else memset(job, 0, sizeof(*job));
+    deferred_teardown_release();
+    if (dynamic) free(job);
+}
+static int fullchain_unregistered_stop_pending(void *session) {
+    unsigned i; int pending = 0;
+    struct fullchain_deferred_teardown *job;
+    deferred_teardown_acquire();
+    for (i = 0; i < ALT_DEFERRED_TEARDOWN_SLOTS; ++i) {
+        job = &deferred_teardowns[i];
+        if (job->receiver == session && !job->fence.registered) pending = 1;
+    }
+    for (job = deferred_overflow; job; job = job->next)
+        if (job->receiver == session && !job->fence.registered) pending = 1;
+    deferred_teardown_release();
+    return pending;
 }
 
 static void *fullchain_deferred_teardown_worker(void *arg) {
@@ -64,26 +99,49 @@ static void *fullchain_deferred_teardown_worker(void *arg) {
     deferred_teardown_acquire(); job->ready = 2; deferred_teardown_release();
     if (job->params) alt_airplay_release_object((void *)job->params);
     fullchain_lifecycle_leave(job->receiver, &job->fence, 0);
-    deferred_teardown_acquire();
-    memset(job, 0, sizeof(*job));
-    deferred_teardown_release();
+    deferred_discard(job);
     return NULL;
+}
+
+static void deferred_start(struct fullchain_deferred_teardown *job) {
+    pthread_t thread;
+    int rc;
+    void *receiver = job->receiver;
+    int (*create_fn)(pthread_t *, const void *, void *(*)(void *), void *) =
+        (int (*)(pthread_t *, const void *, void *(*)(void *), void *))dlsym(RTLD_DEFAULT, "pthread_create");
+    int (*detach_fn)(pthread_t) = (int (*)(pthread_t))dlsym(RTLD_DEFAULT, "pthread_detach");
+    rc = create_fn && detach_fn ? create_fn(&thread, NULL, fullchain_deferred_teardown_worker, job) : -1;
+    if (rc) {
+        deferred_teardown_acquire(); job->thread_started = 0; deferred_teardown_release();
+        altscreen_log("WARN PHASE=TEARDOWN_DEFERRED_QUEUE receiver=%p thread_rc=%d request_retained=1 maintenance_retry=1", receiver, rc);
+    } else {
+        rc = detach_fn(thread);
+        if (rc) altscreen_log("WARN PHASE=TEARDOWN_DEFERRED_DETACH receiver=%p rc=%d", receiver, rc);
+    }
+}
+void fullchain_deferred_retry_tick(void) {
+    struct fullchain_deferred_teardown *job = NULL, *p;
+    unsigned i; uint64_t now = deferred_now_ms();
+    deferred_teardown_acquire();
+    for (i = 0; i < ALT_DEFERRED_TEARDOWN_SLOTS; ++i) {
+        p = &deferred_teardowns[i];
+        if (p->ready == 1 && !p->thread_started && now - p->last_start_ms >= 1000u) { job = p; break; }
+    }
+    if (!job) for (p = deferred_overflow; p; p = p->next)
+        if (p->ready == 1 && !p->thread_started && now - p->last_start_ms >= 1000u) { job = p; break; }
+    if (job) { job->thread_started = 1; job->last_start_ms = now; }
+    deferred_teardown_release();
+    if (job) deferred_start(job);
 }
 
 static int fullchain_defer_teardown(void *receiver, const void *params, int reason,
                                    struct alt_session_lease *fence) {
     struct fullchain_deferred_teardown *job = NULL;
-    pthread_t thread;
-    int (*create_fn)(pthread_t *, const void *, void *(*)(void *), void *);
-    int (*detach_fn)(pthread_t);
-    int full, rc;
+    int full;
     unsigned scope;
     unsigned i;
     scope = fullchain_teardown_scope(params, &full);
-    detach_fn = (int (*)(pthread_t))dlsym(RTLD_DEFAULT, "pthread_detach");
-    create_fn = (int (*)(pthread_t *, const void *, void *(*)(void *), void *))
-        dlsym(RTLD_DEFAULT, "pthread_create");
-    if (!detach_fn || !create_fn) return 0;
+
     deferred_teardown_acquire();
     for (i = 0; i < ALT_DEFERRED_TEARDOWN_SLOTS; ++i) {
         struct fullchain_deferred_teardown *current = &deferred_teardowns[i];
@@ -93,8 +151,19 @@ static int fullchain_defer_teardown(void *receiver, const void *params, int reas
         }
         if (!current->receiver && !job) job = current;
     }
+    if (!job) {
+        struct fullchain_deferred_teardown *p;
+        for (p = deferred_overflow; p; p = p->next) {
+            if (p->ready == 1 && p->receiver == receiver && p->full) {
+                deferred_teardown_release(); return 1;
+            }
+        }
+        deferred_teardown_release();
+        job = calloc(1, sizeof(*job));
+        deferred_teardown_acquire();
+        if (job) { job->dynamic = 1; job->next = deferred_overflow; deferred_overflow = job; }
+    }
     if (job) {
-        memset(job, 0, sizeof(*job));
         job->receiver = receiver;
         job->params = params;
         job->reason = reason;
@@ -103,37 +172,30 @@ static int fullchain_defer_teardown(void *receiver, const void *params, int reas
     }
     deferred_teardown_release();
     if (!job) {
-        altscreen_log("ERROR PHASE=TEARDOWN_DEFERRED_QUEUE receiver=%p reason=queue_full retry_required=1", receiver);
+        altscreen_log("ERROR PHASE=TEARDOWN_DEFERRED_QUEUE receiver=%p reason=allocation_failed retry_required=1", receiver);
         return 0;
     }
     if (params && !alt_airplay_retain_object((void *)params)) {
-        deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
+        deferred_discard(job);
         return 0;
     }
-    if (!full && !scope) job->audio_epochs_valid = fullchain_audio_snapshot(params, fence, job->audio_epochs);
+    if (!full && !scope && fence->registered) job->audio_epochs_valid = fullchain_audio_snapshot(params, fence, job->audio_epochs);
     /* Unknown stream schemas remain serialized rather than allowing a delayed
      * teardown whose target cannot be distinguished from a replacement. */
-    if (!alt_session_guard_defer(fence, full || (scope & (TEARDOWN_MAIN | TEARDOWN_ALT)) || !job->audio_epochs_valid)) {
+    if (fence->registered && !alt_session_guard_defer(fence, full || (scope & (TEARDOWN_MAIN | TEARDOWN_ALT)) || !job->audio_epochs_valid)) {
         if (params) alt_airplay_release_object((void *)params);
-        deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
+        deferred_discard(job);
         return 0;
     }
     job->fence = *fence;
-    /* No metadata lock around thread creation. The caller still owns fence
-     * until successful creation; the worker waits for ownership publication. */
-    rc = create_fn(&thread, NULL, fullchain_deferred_teardown_worker, job);
-    if (rc != 0) {
-        if (params) alt_airplay_release_object((void *)params);
-        deferred_teardown_acquire(); memset(job, 0, sizeof(*job)); deferred_teardown_release();
-        altscreen_log("ERROR PHASE=TEARDOWN_DEFERRED_QUEUE receiver=%p thread_rc=%d retry_required=1", receiver, rc);
-        return 0;
-    }
-    rc = detach_fn(thread);
-    if (rc) altscreen_log("ERROR PHASE=TEARDOWN_DEFERRED_DETACH receiver=%p rc=%d", receiver, rc);
-    memset(fence, 0, sizeof(*fence)); /* transferred, not released by caller */
+    /* Transfer ownership before spawning. Failed thread creation leaves the
+     * request and reservation in this backlog for the maintenance worker. */
+    memset(fence, 0, sizeof(*fence));
+    deferred_teardown_acquire();
+    job->thread_started = 1; job->last_start_ms = deferred_now_ms(); job->ready = 1;
+    deferred_teardown_release();
     altscreen_log("PHASE=TEARDOWN_DEFERRED_QUEUE receiver=%p full=%d request_retained=1 guard_reservation_held=1", receiver, full);
-    __sync_synchronize();
-    job->ready = 1;
+    deferred_start(job);
     return 1;
 }
 

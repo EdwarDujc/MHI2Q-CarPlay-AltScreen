@@ -100,6 +100,8 @@ copy_delta() {
     [ -f "$SOURCE" ] || return 0
     init_dest || return 0
     size=$(wc -c < "$SOURCE" 2>/dev/null || echo 0)
+    set -- $size
+    size=${1:-0}
     inode=$(ls -i "$SOURCE" 2>/dev/null | awk '{print $1}')
     case "$size" in ''|*[!0-9]*) return 0 ;; esac
     if [ "$OFFSET" -gt "$size" ] || { [ -n "$INODE" ] && [ -n "$inode" ] && [ "$INODE" != "$inode" ]; }; then

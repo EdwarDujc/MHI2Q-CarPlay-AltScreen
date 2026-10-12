@@ -5,6 +5,7 @@
 #include <stdint.h>
 /* Value-only cleanup ownership: no receiver/ScreenSession pointer survives. */
 struct p1404_pf_lease { uint16_t port; uint32_t generation; };
+void p1404_alt111_firewall_maintenance_start(void);
 int p1404_alt111_firewall_open(uint16_t port);
 int p1404_alt111_firewall_close(uint16_t port);
 int p1404_alt111_firewall_open_owned(uint16_t port, struct p1404_pf_lease *lease);

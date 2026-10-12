@@ -624,6 +624,7 @@ static void* connector_main(void* arg) {
     (void)arg;
     LOG_INFO(LOG_MODULE, "connector thread started pid=%d -> %s:%d", (int)getpid(), BUS_TCP_HOST, BUS_TCP_PORT);
 
+    unsigned reconnect_delay_ms = 100;
     /* Outer loop: keep the link alive across Java HMI restarts. */
     while (!g_shutdown) {
         int fd = -1;
@@ -638,7 +639,7 @@ static void* connector_main(void* arg) {
                 LOG_DEBUG(LOG_MODULE, "connect failed (%s), retrying in %d ms",
                           strerror(errno), backoff_ms);
                 usleep(backoff_ms * 1000);
-                if (backoff_ms < 2000) backoff_ms *= 2;
+                if (backoff_ms < 2000) { backoff_ms *= 2; if (backoff_ms > 2000) backoff_ms = 2000; }
             }
         }
         if (g_shutdown) {
@@ -669,12 +670,16 @@ static void* connector_main(void* arg) {
         if (send_frame(fd, 0, false, &hello_frame) != 0) {
             LOG_WARN(LOG_MODULE, "direct HELLO failed fd=%d err=%s", fd, strerror(errno));
             close(fd);
+            usleep(reconnect_delay_ms * 1000u);
+            if (reconnect_delay_ms < 2000u) { reconnect_delay_ms *= 2u; if (reconnect_delay_ms > 2000u) reconnect_delay_ms = 2000u; }
             continue;
         }
         LOG_INFO(LOG_MODULE, "direct HELLO sent fd=%d", fd);
 
         if (send_sync_snapshot(fd, 0, false) != 0) {
             close(fd);
+            usleep(reconnect_delay_ms * 1000u);
+            if (reconnect_delay_ms < 2000u) { reconnect_delay_ms *= 2u; if (reconnect_delay_ms > 2000u) reconnect_delay_ms = 2000u; }
             continue;
         }
 
@@ -699,6 +704,7 @@ static void* connector_main(void* arg) {
         pthread_mutex_unlock(&g_lock);
         pthread_mutex_unlock(&g_sock_write);
 
+        int received_frame = 0;
         while (!g_shutdown) {
             bool still_current;
             pthread_mutex_lock(&g_lock);
@@ -712,8 +718,14 @@ static void* connector_main(void* arg) {
             if (read_frame(fd, gen) != 0) {
                 break;
             }
+            received_frame = 1;
         }
         release_connection(fd, gen);
+        if (!g_shutdown) {
+            if (received_frame) reconnect_delay_ms = 100u;
+            usleep(reconnect_delay_ms * 1000u);
+            if (!received_frame && reconnect_delay_ms < 2000u) { reconnect_delay_ms *= 2u; if (reconnect_delay_ms > 2000u) reconnect_delay_ms = 2000u; }
+        }
 
         if (!g_shutdown) {
             LOG_INFO(LOG_MODULE, "disconnect detected; will reconnect");

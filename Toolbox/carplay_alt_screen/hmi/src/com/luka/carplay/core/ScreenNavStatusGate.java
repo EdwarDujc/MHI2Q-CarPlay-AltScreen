@@ -22,6 +22,9 @@ public final class ScreenNavStatusGate {
     private static boolean appliedRouteBlocked;
     private static boolean desiredCurrentPositionBlocked;
     private static boolean installScheduled;
+    private static long installScheduledAt, lastInstallWarning;
+    private static int installTicket;
+    private static final long INSTALL_TIMEOUT_MS = 5000L;
     private static int policyRevision;
     private static int appliedRevision = -1;
     private static long lastRetryMs;
@@ -31,21 +34,39 @@ public final class ScreenNavStatusGate {
 
     /** All reads/writes of CombiBAPListener.combiservice must happen on NavigationJobs. */
     private static void scheduleInstallLocked() {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        if (installScheduled && (now < installScheduledAt || now - installScheduledAt >= INSTALL_TIMEOUT_MS)) {
+            installScheduled = false;
+            ++installTicket; // A late task may neither clear nor apply a newer task.
+            appliedRevision = -1;
+            installWarning("NavigationJobs task expired; scheduling replacement", null);
+        }
         if (installScheduled || (appliedRevision == policyRevision
                 && gate != null && !gate.hasPendingReplay())) return;
         Navigation navigation = Navigation.getInstance();
         if (navigation == null || navigation.getDispatcher() == null) return;
         installScheduled = true;
+        installScheduledAt = now;
+        final int ticket = ++installTicket;
         try {
             navigation.getDispatcher().execute(new Runnable() {
-                public void run() { installNow(); }
+                public void run() { installNow(ticket); }
             });
         } catch (Throwable t) {
             installScheduled = false;
+            installWarning("NavigationJobs submission failed", t);
         }
     }
 
-    private static synchronized void installNow() {
+    private static void installWarning(String message, Throwable failure) {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        if (lastInstallWarning != 0L && now >= lastInstallWarning && now - lastInstallWarning < 10000L) return;
+        lastInstallWarning = now;
+        try { Log.w(TAG, message + (failure == null ? "" : ": " + failure)); } catch (Throwable ignored) { }
+    }
+
+    private static synchronized void installNow(int ticket) {
+        if (!installScheduled || ticket != installTicket) return;
         installScheduled = false;
         try {
             Navigation navigation = Navigation.getInstance();
@@ -78,6 +99,8 @@ public final class ScreenNavStatusGate {
             appliedRouteBlocked = desiredRouteBlocked;
             appliedRevision = gate.hasPendingReplay() ? -1 : policyRevision;
         } catch (Throwable t) {
+            appliedRevision = -1;
+            installWarning("navigation gate installation failed", t);
         }
     }
 
@@ -180,6 +203,7 @@ public final class ScreenNavStatusGate {
         seedInstrumentState(cs);
         appliedRouteBlocked = desiredRouteBlocked;
         installScheduled = false;
+        ++installTicket;
         Log.i(TAG, "native route-guidance gate installed on Navigation service edge");
         return gate;
     }

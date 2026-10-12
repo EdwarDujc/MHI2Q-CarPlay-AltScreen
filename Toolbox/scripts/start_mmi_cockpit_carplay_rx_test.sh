@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # private111 direct-display START.
 # Arms type111 + H264/decoded SHM taps. Java/HMI remains the sole terminal1/ctx80
 # owner; /tmp/mmi-altscreen-basevideo.ready is published only after displayable3

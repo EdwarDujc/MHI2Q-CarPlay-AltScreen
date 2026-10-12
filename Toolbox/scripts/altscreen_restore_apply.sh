@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # Internal V3 restore APPLY step. Do not invoke directly; use altscreen_restore_transaction.sh.
 # Releases Java80 demand, removes the project-owned carplay_hook.jar, then
 # restores the native AltScreen/preload transaction. No MMI Mirror is involved.

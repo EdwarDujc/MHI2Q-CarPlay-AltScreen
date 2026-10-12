@@ -99,6 +99,7 @@ public class BAPBridge {
     private boolean showRealManeuver = false;
     private String lastManeuverMappingDiagnostic;
     private boolean startupFramePending = true;
+    public static void retryKomoCleanup() { LowerBarKomo.retryCleanup(); }
     private final LowerBarKomo lowerBarKomo = new LowerBarKomo();
     /* Track the primary maneuver's slot identity so we know when iOS
      * actually swapped the head of the list vs. just reordered/extended it.
@@ -414,11 +415,19 @@ public class BAPBridge {
         }
     }
 
+    private static final boolean[] preferenceFallbackLogged = new boolean[3];
+    private static void preferenceFallback(int item, String name) {
+        if (preferenceFallbackLogged[item]) return;
+        preferenceFallbackLogged[item] = true;
+        try { Log.w(TAG, "HU " + name + " unavailable; using fallback"); } catch (Throwable ignored) { }
+    }
+
     private static boolean isMetricDistanceUnits() {
         try {
             int unit = Distance.getSystemUnit();
             return unit == Distance.KM || unit == Distance.METERS || unit == Distance.NONE;
         } catch (Throwable t) {
+            preferenceFallback(0, "distance units");
             return true;
         }
     }
@@ -541,6 +550,7 @@ public class BAPBridge {
                 return;
             }
             KOMOService nextKomo = cs.getKomoService();
+            lowerBarKomo.retry(cs);
             if (cs == this.csRef && nextKomo == this.komoService) return;
             if (this.csRef != null && cs != this.csRef) {
                 try { lowerBarKomo.clearForRebind(this.csRef); }
@@ -2364,6 +2374,7 @@ public class BAPBridge {
             int bap = (v == 11) ? 1 : 0;
             return bap;
         } catch (Throwable t) {
+            preferenceFallback(1, "time format");
         }
         return 0;
     }
@@ -2382,8 +2393,9 @@ public class BAPBridge {
                 return fw.convertUTCTimeToLocalTime(utcMs);
             }
         } catch (Throwable t) {
-            /* ignore */
+            preferenceFallback(2, "timezone");
         }
+        preferenceFallback(2, "timezone");
         return utcMs;
     }
 

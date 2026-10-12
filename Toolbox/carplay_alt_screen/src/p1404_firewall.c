@@ -9,6 +9,8 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <pthread.h>
+#include <dlfcn.h>
 #if defined(QSHIM_FCNTL_H)
 /* QNX 6.5 SDK: sockaddr len/family bytes, F_SETFD=2, FD_CLOEXEC=1. */
 extern int socket(int, int, int);
@@ -28,6 +30,15 @@ extern void altscreen_log(const char *fmt, ...);
 #define PF_OPEN_HELPER_MS 1500u
 #define PF_REAP_MS 100u
 static volatile unsigned g_pf_guard;
+static volatile unsigned g_pf_retry_guard;
+static uint32_t g_pf_cleanup_pending[65536];
+static unsigned g_pf_cleanup_count;
+static int g_pf_maintenance_started;
+static uint64_t g_pf_maintenance_attempt_ms;
+extern void fullchain_deferred_retry_tick(void) __attribute__((weak));
+extern void altscreen_bearer_retry_close(void) __attribute__((weak));
+static void pf_queue_cleanup(uint16_t port, uint32_t generation);
+static void *pf_maintenance_worker(void *unused);
 /* Protected by the same lock as rule mutations. Fixed size, no queue or heap
  * lifetime; a later open of the same port invalidates an older cleanup lease. */
 static uint32_t g_pf_port_generations[65536];
@@ -375,7 +386,8 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
     char *argv[] = { "pfctl", "-f", path, NULL };
     FILE *fp = NULL;
     size_t cap;
-    int changed = 0, ok = 0, n, saved, write_ok, new_owner = -1;
+    int changed = 0, ok = 0, n, saved, write_ok, new_owner = -1, reload_attempted = 0;
+    uint32_t uncertain_generation = 0;
     uint64_t start, deadline, command_deadline;
     if (!port || (!enable && lease && !lease->generation)) return 0;
     start = pf_now_ms();
@@ -445,6 +457,7 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
     fp = NULL;
     command_deadline = enable ? pf_now_ms() + PF_OPEN_HELPER_MS : deadline;
     if (command_deadline > deadline) command_deadline = deadline;
+    reload_attempted = 1;
     if (run_pf(argv, -1, command_deadline)) ok = 1;
     else if (enable && errno == ETIMEDOUT && !pf_expired(deadline)) {
         /* A timed-out helper may already have committed its atomic PF reload.
@@ -480,13 +493,18 @@ done:
         g_pf_port_generations[port] = ++g_pf_generation;
         if (new_owner >= 0) { g_pf_owner_fds[port] = new_owner + 1; new_owner = -1; }
         if (lease) { lease->port = port; lease->generation = g_pf_generation; }
-    } else if (!enable && (!lease || g_pf_port_generations[port] == lease->generation)) {
-        /* A consumed failed cleanup can leave a rule, but cannot own any future
-         * connection. A new open will get a fresh identity even if rule exists. */
+    } else if (enable && reload_attempted && changed && g_pf_generation != UINT32_MAX) {
+        /* A failed/timed-out reload may have committed. Preserve ownership of
+         * that possible aperture until a fresh read+remove succeeds. Never
+         * advertise this port or call an uncertain addition pre-existing. */
+        g_pf_port_rule_added[port] = 1;
+        g_pf_port_generations[port] = uncertain_generation = ++g_pf_generation;
+        if (new_owner >= 0) { g_pf_owner_fds[port] = new_owner + 1; new_owner = -1; }
+    } else if (!enable && ok && (!lease || g_pf_port_generations[port] == lease->generation)) {
+        /* Release ownership only after verified removal (or preservation of a
+         * pre-existing rule). A failed close keeps its generation for retry. */
         g_pf_port_generations[port] = 0;
-        /* A failed removal may have left our aperture in PF. Keep its known
-         * provenance so a later same-process reopen can still remove it. */
-        if (ok) g_pf_port_rule_added[port] = 0;
+        g_pf_port_rule_added[port] = 0;
         if (g_pf_owner_fds[port]) close(g_pf_owner_fds[port] - 1);
         g_pf_owner_fds[port] = 0;
     }
@@ -497,20 +515,102 @@ done:
                   g_pf_status, g_pf_program ? g_pf_program : "unavailable",
                   (unsigned long long)(pf_now_ms() - start), g_pf_error);
     pf_unlock();
+    if (uncertain_generation) pf_queue_cleanup(port, uncertain_generation);
     errno = saved;
     return ok;
 }
 
-int p1404_alt111_firewall_open(uint16_t port) { return apply_rule(port, 1, NULL); }
+static void pf_retry_lock(void) {
+    while (__sync_lock_test_and_set(&g_pf_retry_guard, 1u)) usleep(1000);
+}
+static void pf_retry_unlock(void) { __sync_lock_release(&g_pf_retry_guard); }
+
+void p1404_alt111_firewall_maintenance_start(void) {
+    pthread_t thread;
+    int rc;
+    uint64_t now = pf_now_ms();
+    pf_retry_lock();
+    if (g_pf_maintenance_started || (g_pf_maintenance_attempt_ms && now >= g_pf_maintenance_attempt_ms &&
+            now - g_pf_maintenance_attempt_ms < 5000u)) { pf_retry_unlock(); return; }
+    g_pf_maintenance_started = 1;
+    g_pf_maintenance_attempt_ms = now;
+    pf_retry_unlock();
+    rc = pthread_create(&thread, NULL, pf_maintenance_worker, NULL);
+    if (!rc) {
+        int (*detach_fn)(pthread_t) = (int (*)(pthread_t))dlsym(RTLD_DEFAULT, "pthread_detach");
+        int detach_rc = detach_fn ? detach_fn(thread) : -1;
+        if (detach_rc) altscreen_log("WARN PHASE=ALT111_MAINTENANCE_DETACH rc=%d", detach_rc);
+    } else {
+        pf_retry_lock(); g_pf_maintenance_started = 0; pf_retry_unlock();
+        altscreen_log("WARN PHASE=ALT111_MAINTENANCE_START rc=%d pending_cleanup_retained=1 retry_after_ms=5000", rc);
+    }
+}
+static void pf_queue_cleanup(uint16_t port, uint32_t generation) {
+    if (!port || !generation) return;
+    pf_retry_lock();
+    if (!g_pf_cleanup_pending[port]) ++g_pf_cleanup_count;
+    if (g_pf_cleanup_pending[port] < generation) g_pf_cleanup_pending[port] = generation;
+    pf_retry_unlock();
+    p1404_alt111_firewall_maintenance_start();
+}
+static void *pf_maintenance_worker(void *unused) {
+    uint32_t cursor = 1u;
+    uint64_t next_pf = 0;
+    unsigned delay_seconds = 1u;
+    (void)unused;
+    for (;;) {
+        struct p1404_pf_lease lease = {0, 0};
+        uint64_t now;
+        unsigned i;
+        if (fullchain_deferred_retry_tick) fullchain_deferred_retry_tick();
+        if (altscreen_bearer_retry_close) altscreen_bearer_retry_close();
+        now = pf_now_ms();
+        if (now >= next_pf) {
+            pf_retry_lock();
+            for (i = 0; g_pf_cleanup_count && i < 65535u; ++i) {
+                if (++cursor >= 65536u) cursor = 1u;
+                if (g_pf_cleanup_pending[cursor]) {
+                    lease.port = (uint16_t)cursor;
+                    lease.generation = g_pf_cleanup_pending[cursor];
+                    break;
+                }
+            }
+            pf_retry_unlock();
+            if (lease.generation) {
+                int ok = apply_rule(lease.port, 0, &lease);
+                if (ok) {
+                    pf_retry_lock();
+                    if (g_pf_cleanup_pending[lease.port] == lease.generation) { g_pf_cleanup_pending[lease.port] = 0; --g_pf_cleanup_count; }
+                    pf_retry_unlock();
+                    delay_seconds = 1u;
+                    altscreen_log("PHASE=ALT111_PF_CLEANUP_RETRY port=%u generation=%u result=OK ownership_released=1", lease.port, lease.generation);
+                } else if (delay_seconds < 30u) {
+                    delay_seconds *= 2u;
+                    if (delay_seconds > 30u) delay_seconds = 30u;
+                }
+                next_pf = pf_now_ms() + 1000u * delay_seconds;
+            }
+        }
+        usleep(1000000u);
+    }
+    return NULL;
+}
+
+int p1404_alt111_firewall_open(uint16_t port) { p1404_alt111_firewall_maintenance_start(); return apply_rule(port, 1, NULL); }
 int p1404_alt111_firewall_close(uint16_t port) { return apply_rule(port, 0, NULL); }
 int p1404_alt111_firewall_open_owned(uint16_t port, struct p1404_pf_lease *lease) {
     if (!lease) return 0;
     memset(lease, 0, sizeof(*lease));
+    p1404_alt111_firewall_maintenance_start();
     return apply_rule(port, 1, lease);
 }
 int p1404_alt111_firewall_close_owned(const struct p1404_pf_lease *lease) {
     struct p1404_pf_lease copy;
     if (!lease) return 0;
     copy = *lease;
-    return apply_rule(copy.port, 0, &copy);
+    {
+        int ok = apply_rule(copy.port, 0, &copy);
+        if (!ok) pf_queue_cleanup(copy.port, copy.generation);
+        return ok;
+    }
 }

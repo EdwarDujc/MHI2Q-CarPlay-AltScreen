@@ -185,6 +185,8 @@ const hook_module_def_t* hook_framework_module_at(size_t index);
 /* Injection API - queues an additional semantic frame for the dedicated
  * ICinemoIAP::SendIAP2 worker; it never replaces a stock semantic message,
  * copies FF5A state, or blocks the caller in stock transport code. */
+typedef void (*hook_inject_completion_fn)(uint64_t token, hook_result_t result);
+hook_result_t hook_inject_message_tracked(uint16_t msgid, const uint8_t* payload, size_t payload_len, hook_inject_completion_fn completion, uint64_t token);
 hook_result_t hook_inject_frame(const uint8_t* frame, size_t len);
 hook_result_t hook_inject_message(uint16_t msgid, const uint8_t* payload, size_t payload_len);
 

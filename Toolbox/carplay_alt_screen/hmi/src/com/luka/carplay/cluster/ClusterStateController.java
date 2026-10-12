@@ -492,8 +492,8 @@ public final class ClusterStateController {
             + "/owned=" + (isClusterOwned() ? "1" : "0")
             + "/rgi=" + (rgiPresentationActive ? "1" : "0");
         if (!signature.equals(lastStateSignature)) {
-            lastStateSignature = signature;
             if (writeHmiState(layout, view, layoutName, smallDx, smallDy)) {
+                lastStateSignature = signature;
                 diag("state published: " + layout + "_" + view
                     + " layoutClass=" + layoutName
                     + " c80=" + smallDx + " c81=" + smallDy);
@@ -607,6 +607,7 @@ public final class ClusterStateController {
         if (!compositeApplied || rebindRgi) {
             int actual = currentContext(dm);
             if (!stillWantComposite()) return;
+            if (actual < 0) { contextFailure("context readback unavailable; bounce suppressed"); return; }
             diag("ownership acquire requested; base=" + (baseActive ? "1" : "0")
                 + "/" + (baseReady ? "1" : "0")
                 + " rgi=" + (rgiPresentationActive ? "1" : "0")
@@ -1422,8 +1423,10 @@ public final class ClusterStateController {
             m.invoke(null, new Object[0]);
         } catch (ClassNotFoundException e) {
             geometryClassMissing = true;
+            diag("WARN geometry reapply unavailable: " + describe(e));
         } catch (NoSuchMethodException e) {
             geometryClassMissing = true;
+            diag("WARN geometry reapply unavailable: " + describe(e));
         } catch (Throwable t) {
             diag("WARN geometry reapply failed reason=" + reason + ": " + describe(t));
         }
@@ -1585,13 +1588,19 @@ public final class ClusterStateController {
     }
 
     private static void copyFile(File src, File dst) throws Exception {
-        FileInputStream in = new FileInputStream(src);
-        FileOutputStream out = new FileOutputStream(dst);
-        byte[] buf = new byte[512];
-        int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-        in.close();
-        out.close();
+        FileInputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = new FileInputStream(src);
+            out = new FileOutputStream(dst);
+            byte[] buf = new byte[512];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            out.flush();
+        } finally {
+            try { if (out != null) out.close(); }
+            finally { if (in != null) in.close(); }
+        }
     }
 
     private static long nowMs() {

@@ -364,6 +364,7 @@ public class CarPlayHook {
 
     private static void pollRgiRuntimeNow() {
         com.luka.carplay.core.ScreenNavStatusGate.retryPending(active);
+        com.luka.carplay.routeguidance.BAPBridge.retryKomoCleanup();
         long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (active && savedContext != null &&
                 (now < lastServiceProbe || now - lastServiceProbe >= 1000L)) {
@@ -393,7 +394,7 @@ public class CarPlayHook {
             public void run() {
                 while (true) {
                     try { pollRgiRuntime(); }
-                    catch (Throwable t) { Log.e(TAG, "RGI runtime monitor", t); }
+                    catch (Throwable t) { try { Log.e(TAG, "RGI runtime monitor", t); } catch (Throwable ignored) { } }
                     sleep(200);
                 }
             }
@@ -406,10 +407,18 @@ public class CarPlayHook {
      * Service Discovery
      * ============================================================ */
 
+    private static long lastDiscoveryWarning;
+    private static void discoveryWarning(String message) {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        if (lastDiscoveryWarning != 0L && now >= lastDiscoveryWarning && now - lastDiscoveryWarning < 10000L) return;
+        lastDiscoveryWarning = now;
+        try { Log.w(TAG, message); } catch (Throwable ignored) { }
+    }
+
     private static Object getNaviService(Object context) {
         try {
             if (!(context instanceof IContext)) {
-                Log.d(TAG, "getNaviService: context is not IContext");
+                discoveryWarning("getNaviService: context is not IContext");
                 return null;
             }
             IServiceManager sm = ((IContext) context).getServiceManager();
@@ -449,7 +458,7 @@ public class CarPlayHook {
             return next;
 
         } catch (Throwable e) {
-            Log.d(TAG, "getNaviService: " + e.getMessage());
+            discoveryWarning("getNaviService: " + e);
             return null;
         }
     }
@@ -504,7 +513,7 @@ public class CarPlayHook {
             if (!(context instanceof IContext)) return null;
             return ((IContext) context).getDeviceManager();
         } catch (Throwable e) {
-            Log.d(TAG, "getDeviceManager: " + e.getMessage());
+            discoveryWarning("getDeviceManager: " + e);
             return null;
         }
     }

@@ -129,7 +129,10 @@ public class RendererServer {
      */
     public boolean connect() {
         synchronized (lock) {
-            if (server != null && !server.isClosed()) return true;
+            if (server != null && !server.isClosed()) {
+                if (acceptThread != null && acceptThread.isAlive() && writerThread != null && writerThread.isAlive()) return true;
+                failRun(server, lifecycleGeneration, "dead-worker", null);
+            }
             ServerSocket ss = null;
             try {
                 ss = new ServerSocket();
@@ -146,17 +149,27 @@ public class RendererServer {
 
             final int lifecycle = ++lifecycleGeneration;
             final ServerSocket ownedServer = server;
+            try {
             acceptThread = new Thread(new Runnable() {
-                public void run() { acceptLoop(ownedServer, lifecycle); }
+                public void run() {
+                    try { acceptLoop(ownedServer, lifecycle); }
+                    catch (Throwable t) { transportWarning("accept worker failed", t); }
+                    finally { failRun(ownedServer, lifecycle, "accept-exit", null); }
+                }
             }, "RendererServer-Accept");
             acceptThread.setDaemon(true);
-            acceptThread.start();
+            try { acceptThread.start(); } catch (Throwable t) { failRun(ownedServer, lifecycle, "accept-start", t); return false; }
 
             writerThread = new Thread(new Runnable() {
-                public void run() { writerLoop(lifecycle); }
+                public void run() {
+                    try { writerLoop(lifecycle); }
+                    catch (Throwable t) { transportWarning("writer worker failed", t); }
+                    finally { failRun(ownedServer, lifecycle, "writer-exit", null); }
+                }
             }, "RendererServer-Write");
             writerThread.setDaemon(true);
-            writerThread.start();
+            try { writerThread.start(); } catch (Throwable t) { failRun(ownedServer, lifecycle, "writer-start", t); return false; }
+            } catch (Throwable t) { failRun(ownedServer, lifecycle, "worker-construction", t); return false; }
         }
         return true;
     }
@@ -181,14 +194,45 @@ public class RendererServer {
      * any current socket, so renderer respawn -> new accept -> we
      * automatically pick up the new connection.
      */
+    private long lastTransportWarning;
+    private void transportWarning(String message, Throwable t) {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        synchronized (lock) {
+            if (lastTransportWarning != 0L && now >= lastTransportWarning && now - lastTransportWarning < 10000L) return;
+            lastTransportWarning = now;
+        }
+        try { Log.w(TAG, message + ": " + t); } catch (Throwable ignored) { }
+    }
+
+    private void failRun(ServerSocket owned, int lifecycle, String reason, Throwable failure) {
+        boolean changed = false;
+        synchronized (lock) {
+            if (server != owned || lifecycleGeneration != lifecycle) return;
+            running = false;
+            ++lifecycleGeneration;
+            closeClientLocked();
+            try { owned.close(); } catch (Throwable ignored) { }
+            server = null;
+            acceptThread = null;
+            writerThread = null;
+            lock.notifyAll();
+            synchronized (writeLock) { writeLock.notifyAll(); }
+            changed = true;
+        }
+        if (failure != null) transportWarning(reason, failure);
+        if (changed) notifyStateChanged(reason);
+    }
+
     private boolean isCurrentRun(int lifecycle) {
         return running && lifecycleGeneration == lifecycle;
     }
 
     private void acceptLoop(ServerSocket ss, int lifecycle) {
+        int backoff = 200;
         while (isCurrentRun(lifecycle) && ss != null && !ss.isClosed()) {
             try {
-                final Socket s = ss.accept();    /* blocks until renderer connects */
+                final Socket s = ss.accept();
+                backoff = 200;    /* blocks until renderer connects */
                 try {
                     s.setTcpNoDelay(true);
                     /* SO_TIMEOUT on the read side — heartbeat dead-detection.
@@ -231,18 +275,20 @@ public class RendererServer {
                     }, "RendererServer-Read");
                     reader.setDaemon(true);
                     reader.start();
-                } catch (IOException setupEx) {
+                } catch (Throwable setupEx) {
+                    transportWarning("accepted socket setup failed", setupEx);
                     /* accept() succeeded but post-accept setup failed — close the
                      * orphan socket so its FD isn't leaked, then keep accepting. */
                     try { s.close(); } catch (Exception e2) {}
                 }
             } catch (IOException e) {
-                if (running) {
-                }
+                if (isCurrentRun(lifecycle)) transportWarning("accept failed; retry delayed", e);
                 /* If the listen socket was closed (dispose()), exit. */
                 synchronized (lock) {
-                    if (server == null || server.isClosed()) break;
+                    if (!isCurrentRun(lifecycle) || server != ss || ss.isClosed()) break;
                 }
+                try { Thread.sleep(backoff); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+                if (backoff < 2000) backoff = Math.min(2000, backoff * 2);
             }
         }
         Log.i(TAG, "accept thread exiting");

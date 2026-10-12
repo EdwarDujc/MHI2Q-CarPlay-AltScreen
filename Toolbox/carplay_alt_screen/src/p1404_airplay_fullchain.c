@@ -66,6 +66,8 @@ static unsigned fullchain_teardown_scope(const void *params, int *out_full) {
 
 #include "p1404_bootstrap.h"
 
+static int fullchain_unregistered_stop_pending(void *session);
+
 static int fullchain_lifecycle_enter(void *session,
                                     enum alt_session_operation operation,
                                     struct alt_session_lease *lease) {
@@ -82,7 +84,13 @@ static int fullchain_lifecycle_enter(void *session,
             return ALT_SESSION_REFUSED;
         }
     }
-    admission = alt_session_guard_enter(session, operation, lease);
+    if (p1404_mutate_armed) p1404_alt111_firewall_maintenance_start();
+    if (operation != ALT_SESSION_TEARDOWN && operation != ALT_SESSION_DEFERRED_TEARDOWN &&
+            operation != ALT_SESSION_STOP_COMMAND && fullchain_unregistered_stop_pending(session)) {
+        memset(lease, 0, sizeof(*lease));
+        lease->operation = operation;
+        admission = ALT_SESSION_REFUSED;
+    } else admission = alt_session_guard_enter(session, operation, lease);
     lease->retained = retained;
     altscreen_log("PHASE=SESSION_LIFECYCLE_ENTER receiver=%p operation=%d admission=%d waited=%u complete_session_serialization=1",
                   session, (int)operation, admission, lease->waited);
@@ -143,7 +151,6 @@ static int fullchain_teardown_admitted(void *session, const void *params,
     unsigned char stock_done = 0;
     int full = 0;
     scope = fullchain_teardown_scope(params, &full);
-    if (scope & TEARDOWN_MAIN) bootstrap_forget(session);
     if (!real_session_teardown) {
         if (p1404_direct_stock_symbol_named)
             real_session_teardown = (session_teardown_fn)
@@ -187,6 +194,7 @@ static int fullchain_teardown_admitted(void *session, const void *params,
         return 0;
     }
     real_session_teardown(session, params, reason, &stock_done);
+    if (scope & TEARDOWN_MAIN) bootstrap_forget(session);
     if (audio_owned) alt_airplay_release_object(audio_owned);
     /* The worker no longer references stock clocks. Stop stock audio before
      * waiting on ancillary PF helpers, retaining lifecycle serialization. */
@@ -205,7 +213,7 @@ void AirPlayReceiverSessionTearDown(void *session, const void *params,
     int admission = fullchain_lifecycle_enter(session, ALT_SESSION_TEARDOWN, &lease);
     if (admission != ALT_SESSION_ENTERED) {
         int deferred = admission == ALT_SESSION_REFUSED &&
-            lease.registered && lease.retained &&
+            lease.retained &&
             fullchain_defer_teardown(session, params, reason, &lease);
         if (out_done) *out_done = (unsigned char)lease.completed;
         altscreen_log("PHASE=TEARDOWN_DUPLICATE receiver=%p admission=%d done=%d deferred=%d stock_called=0",
@@ -521,7 +529,6 @@ static int fullchain_stop_server(void *session, unsigned flags, void *command,
         fullchain_lifecycle_leave(session, &lease, 0);
         return admission == ALT_SESSION_CLOSED ? 0 : -1;
     }
-    bootstrap_forget(session);
     if (!alt_private111_teardown_deferred(session, "stopServer", &after_stock_cleanup)) {
         altscreen_log("ERROR PHASE=TEARDOWN_PRIVATE_BARRIER session=%p command=stopServer callback_refused=1 stock_caller_may_ignore_status=1",
                       session);
@@ -530,6 +537,7 @@ static int fullchain_stop_server(void *session, unsigned flags, void *command,
     }
     r = AirPlayReceiverSessionPlatformControl_legacy(session, flags, command,
                                                    qualifier, params, out_params);
+    if (r == 0) bootstrap_forget(session);
     alt_private111_finish_cleanup(&after_stock_cleanup);
     fullchain_lifecycle_leave(session, &lease, 0);
     return r;

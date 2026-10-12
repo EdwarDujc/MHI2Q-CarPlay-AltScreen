@@ -105,12 +105,35 @@ public final class CarplayBus {
     /* ---- lifecycle ---- */
     public void start() {
         synchronized (lock) {
-            if (running) return;
+            if (running && ioThread != null && ioThread.isAlive() &&
+                    (writerThread == null || writerThread.isAlive()) &&
+                    (readerThread == null || readerThread.isAlive())) return;
+            // Retire the old listener before binding a replacement, even if a
+            // failed writer left the accept thread blocked in accept().
+            closeConnectionLocked("worker-restart");
+            if (serverSocket != null) { try { serverSocket.close(); } catch (Throwable ignored) { } serverSocket = null; }
+            synchronized (writeLock) { clearWriteQueueLocked(); writeLock.notifyAll(); }
+            writerThread = null; readerThread = null;
             final int lifecycle = ++lifecycleGeneration;
             running = true;
-            ioThread = new Thread(new Runnable() { public void run() { ioLoop(lifecycle); } }, "carplay-bus");
+            ioThread = new Thread(new Runnable() { public void run() {
+                try { ioLoop(lifecycle); }
+                catch (Throwable t) { bindWarning("bus worker failed: " + t); }
+                finally {
+                    synchronized (lock) {
+                        if (lifecycleGeneration == lifecycle) {
+                            running = false;
+                            closeConnectionLocked("worker-exit");
+                            if (serverSocket != null) { try { serverSocket.close(); } catch (Throwable ignored) { } serverSocket = null; }
+                            synchronized (writeLock) { writeLock.notifyAll(); }
+                            lock.notifyAll();
+                            ioThread = null;
+                        }
+                    }
+                }
+            } }, "carplay-bus");
             ioThread.setDaemon(true);
-            ioThread.start();
+            try { ioThread.start(); } catch (Throwable t) { running = false; ioThread = null; bindWarning("bus worker start failed: " + t); }
         }
         Log.i(TAG, "started (server " + HOST + ":" + port + ")");
     }
@@ -369,13 +392,12 @@ public final class CarplayBus {
      * throws → it switches to the new socket).  This makes the bus un-wedgeable no matter how many
      * hook instances connect and die — no reboot needed to recover a stuck connection. */
     private void ioLoop(final int lifecycle) {
-        if (!openServerSocket(lifecycle)) {
-            Log.e(TAG, "bind failed; bus disabled");
-            synchronized (lock) {
-                if (lifecycleGeneration == lifecycle) running = false;
-            }
-            return;
+        int bindDelay = 200;
+        while (isCurrentRun(lifecycle) && !openServerSocket(lifecycle)) {
+            sleep(bindDelay);
+            bindDelay = Math.min(2000, bindDelay * 2);
         }
+        if (!isCurrentRun(lifecycle)) return;
         synchronized (lock) {
             if (!isCurrentRun(lifecycle)) return;
             writerThread = new Thread(new Runnable() { public void run() { writerLoop(lifecycle); } }, "carplay-bus-writer");
@@ -388,6 +410,14 @@ public final class CarplayBus {
         while (isCurrentRun(lifecycle)) {
             if (!acceptOne(lifecycle)) { if (isCurrentRun(lifecycle)) sleep(200); }
         }
+    }
+
+    private long lastBindWarning;
+    private void bindWarning(String message) {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        if (lastBindWarning != 0L && now >= lastBindWarning && now - lastBindWarning < 10000L) return;
+        lastBindWarning = now;
+        try { Log.w(TAG, message); } catch (Throwable ignored) { }
     }
 
     private boolean openServerSocket(int lifecycle) {
@@ -404,7 +434,7 @@ public final class CarplayBus {
                 return true;
             } catch (IOException e) {
                 if (ss != null) try { ss.close(); } catch (IOException closeError) { }
-                Log.e(TAG, "bind " + HOST + ":" + port + " failed: " + e.getMessage());
+                bindWarning("bind " + HOST + ":" + port + " failed: " + e.getMessage());
                 return false;
             }
         }

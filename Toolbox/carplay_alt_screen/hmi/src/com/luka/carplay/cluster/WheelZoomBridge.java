@@ -106,10 +106,10 @@ public final class WheelZoomBridge {
         }
 
         int delta = magnification - lastMagnification;
-        lastMagnification = magnification;
         if (delta == 0) return;
 
         if (!ownedAtCallback || !ClusterStateController.isClusterOwned()) {
+            lastMagnification = magnification; // Never replay input made outside our ownership.
             ++ignoredNotOwnedCount;
             diag("WHEEL_ZOOM_INPUT magnification=" + magnification
                 + " delta=" + delta
@@ -120,6 +120,7 @@ public final class WheelZoomBridge {
 
         int steps = delta < 0 ? -delta : delta;
         if (steps > MAX_STEPS_PER_CALLBACK) {
+            lastMagnification = magnification;
             diag("WHEEL_ZOOM_INPUT magnification=" + magnification
                 + " delta=" + delta
                 + " action=IGNORED reason=delta_outlier max_steps="
@@ -157,7 +158,7 @@ public final class WheelZoomBridge {
         ++sequence;
         boolean ok = appendEvent(
             sequence, direction, magnification, delta, steps);
-        if (ok) ++queuedCount;
+        if (ok) { ++queuedCount; lastMagnification = magnification; }
         diag("WHEEL_ZOOM_INPUT magnification=" + magnification
             + " delta=" + delta
             + " action=" + action

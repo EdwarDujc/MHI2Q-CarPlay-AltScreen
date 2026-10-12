@@ -54,6 +54,8 @@ static uint64_t now_monotonic_ms(void) {
 static pthread_mutex_t g_rgd_debounce_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_rgd_start_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t request_generation;
+static uint64_t start_token, pending_start_token, pending_start_generation;
+static bool start_pending;
 
 /* Forward decl — implemented after rgd_update_t is in scope. */
 void rgd_periodic_tick(void);
@@ -1183,6 +1185,7 @@ static void write_bus_snapshot_from_cache(int extra_slot, const rgd_maneuver_t* 
 void rgd_clear_state(const char* reason) {
     pthread_mutex_lock(&g_rgd_start_lock);
     ++request_generation;
+    start_pending = false;
     g_rgd.active = false;
     g_rgd.sent_5203 = false;
     g_rgd.sent_5200 = false;
@@ -1223,11 +1226,32 @@ void rgd_clear_state(const char* reason) {
     LOG_INFO(LOG_MODULE, "State cleared: %s", reason ? reason : "unknown");
 }
 
+static void rgd_start_completion(uint64_t token, hook_result_t result) {
+    bool current;
+    unsigned attempts = 0;
+    pthread_mutex_lock(&g_rgd_start_lock);
+    current = start_pending && token == pending_start_token &&
+        request_generation == pending_start_generation && g_rgd.component_valid;
+    if (current) {
+        start_pending = false;
+        if (result == HOOK_OK) {
+            ++g_rgd.start_5200_attempts;
+            g_rgd.sent_5200 = true;
+            g_rgd.active = true;
+            rgd_update_session_active();
+        }
+        attempts = g_rgd.start_5200_attempts;
+    }
+    pthread_mutex_unlock(&g_rgd_start_lock);
+    LOG_INFO(LOG_MODULE, "0x5200 transport result=%d current=%d attempts=%u token=%llu queued_is_not_sent=1",
+        result, current, attempts, (unsigned long long)token);
+}
+
 hook_result_t rgd_request_updates(void) {
     uint64_t now = now_monotonic_ms();
     uint64_t retry_ms;
     unsigned int attempt;
-    uint64_t generation;
+    uint64_t generation, token;
     uint16_t component;
 
     /* Serialize the transport callback and 1 Hz heartbeat.  Claim the retry
@@ -1237,7 +1261,7 @@ hook_result_t rgd_request_updates(void) {
         pthread_mutex_unlock(&g_rgd_start_lock);
         return HOOK_ERR_INIT;
     }
-    if (g_rgd.got_520x) {
+    if (g_rgd.got_520x || start_pending) {
         pthread_mutex_unlock(&g_rgd_start_lock);
         return HOOK_OK;
     }
@@ -1248,8 +1272,11 @@ hook_result_t rgd_request_updates(void) {
         return HOOK_OK;
     }
     g_rgd.last_5200_ms = now;
-    attempt = ++g_rgd.start_5200_attempts;
+    attempt = g_rgd.start_5200_attempts + 1u;
     generation = request_generation;
+    token = ++start_token;
+    if (!token) token = ++start_token;
+    start_pending = true; pending_start_token = token; pending_start_generation = generation;
     component = g_rgd.component_id;
     pthread_mutex_unlock(&g_rgd_start_lock);
 
@@ -1265,45 +1292,28 @@ hook_result_t rgd_request_updates(void) {
     size_t n = 0;
 
     n = iap2_build_tlv_u16(tlv + off, sizeof(tlv) - off, RGD_START_TLV_COMPONENT_ID, component);
-    if (n == 0) return HOOK_ERR_PARAM;
+    if (n == 0) goto build_failed;
     off += n;
 
     n = iap2_build_tlv(tlv + off, sizeof(tlv) - off, RGD_START_TLV_SOURCE_NAME, NULL, 0);
-    if (n == 0) return HOOK_ERR_PARAM;
+    if (n == 0) goto build_failed;
     off += n;
 
     n = iap2_build_tlv(tlv + off, sizeof(tlv) - off, RGD_START_TLV_SOURCE_SUPPORTS_RG, NULL, 0);
-    if (n == 0) return HOOK_ERR_PARAM;
+    if (n == 0) goto build_failed;
     off += n;
 
     n = iap2_build_tlv(tlv + off, sizeof(tlv) - off, RGD_START_TLV_SUPPORTS_EXIT_INFO, NULL, 0);
-    if (n == 0) return HOOK_ERR_PARAM;
+    if (n == 0) goto build_failed;
     off += n;
 
-    hook_result_t res = hook_inject_message(IAP2_MSG_ROUTE_GUIDANCE_START, tlv, off);
-    if (res == HOOK_OK) {
-        pthread_mutex_lock(&g_rgd_start_lock);
-        if (generation != request_generation || !g_rgd.component_valid || component != g_rgd.component_id) {
-            pthread_mutex_unlock(&g_rgd_start_lock);
-            return HOOK_ERR_INIT;
-        }
-        g_rgd.sent_5200 = true;
-        g_rgd.active = true;
-        rgd_update_session_active();
-        pthread_mutex_unlock(&g_rgd_start_lock);
-        LOG_INFO(LOG_MODULE, "Sent 0x5200 attempt=%u (component=0x%04X, opts=source_name+source_supports_rg+exit_info)",
-                 attempt, g_rgd.component_id);
-    } else {
-        /* A transport failure was not a real attempt.  Make the next heartbeat
-         * retry immediately instead of waiting for the backoff interval. */
-        pthread_mutex_lock(&g_rgd_start_lock);
-        if (generation == request_generation) {
-            if (g_rgd.start_5200_attempts > 0) --g_rgd.start_5200_attempts;
-            g_rgd.last_5200_ms = 0;
-        }
-        pthread_mutex_unlock(&g_rgd_start_lock);
-    }
+    hook_result_t res = hook_inject_message_tracked(IAP2_MSG_ROUTE_GUIDANCE_START, tlv, off, rgd_start_completion, token);
+    if (res != HOOK_OK) rgd_start_completion(token, res);
+    else LOG_INFO(LOG_MODULE, "Queued 0x5200 candidate_attempt=%u component=0x%04X; awaiting stock transport result", attempt, component);
     return res;
+build_failed:
+    rgd_start_completion(token, HOOK_ERR_PARAM);
+    return HOOK_ERR_PARAM;
 }
 
 hook_result_t rgd_stop_updates(void) {

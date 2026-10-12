@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # MMI-Cockpit-Carplay one-step INSTALL (GEM: INSTALL WITH RGI / INSTALL NO RGI).
 #
 #   1. check the package and firmware

@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # V3.1 transactional INSTALL wrapper.
 # Snapshot the exact pre-install production + SD control state, run the existing
 # installer as APPLY, verify the final installed contract, and roll back on any

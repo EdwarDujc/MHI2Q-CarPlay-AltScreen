@@ -22,7 +22,7 @@ struct alt111_stream_recovery {
     uint32_t last_progress_at, last_submit_at, stable_at, stable_count;
     uint32_t command_seq, inflight_seq;
     unsigned attempts;
-    int initialized, waiting_frame, exhausted_logged;
+    int initialized, waiting_frame, exhausted_logged, have_submit;
 };
 
 /* Called under native_lock, including result(). Sequence survives producer
@@ -67,7 +67,7 @@ static unsigned alt111_recovery_poll(struct alt111_stream_recovery *s,
     }
     if (!eligible || (uint32_t)(now - s->last_progress_at) < ALT111_RECOVERY_IDLE_US)
         return result;
-    if (s->attempts &&
+    if (s->have_submit &&
         (uint32_t)(now - s->last_submit_at) < ALT111_RECOVERY_RETRY_US)
         return result;
     if (s->attempts >= ALT111_RECOVERY_MAX_ATTEMPTS) {
@@ -81,9 +81,20 @@ static unsigned alt111_recovery_poll(struct alt111_stream_recovery *s,
     if (!s->command_seq) ++s->command_seq;
     s->inflight_seq = s->command_seq;
     s->last_submit_at = now;
+    s->have_submit = 1;
     ++s->attempts;
     s->waiting_frame = 1;
     return result | ALT111_RECOVERY_REQUEST;
+}
+
+/* Local admission/submission refusal did not reach the phone. Refund its
+ * budget while retaining the backoff timestamp and fencing late callbacks. */
+static int alt111_recovery_submit_failed(struct alt111_stream_recovery *s, uint32_t seq) {
+    if (!seq || s->inflight_seq != seq) return 0;
+    s->inflight_seq = 0;
+    s->waiting_frame = 0;
+    if (s->attempts) --s->attempts;
+    return 1;
 }
 
 static int alt111_recovery_result(struct alt111_stream_recovery *s, uint32_t seq) {

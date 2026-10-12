@@ -129,6 +129,14 @@ public class GatedCombiService implements CombiBAPServiceNavi {
         if (!blockCurrentPositionInfo) { real.updateDestinationInfo(a); replayPending[11] = false; }
     }
 
+    private long lastReplayWarning;
+    private void replayWarning(Throwable t) {
+        long now = com.luka.carplay.framework.ElapsedClock.nowMs();
+        if (lastReplayWarning != 0L && now >= lastReplayWarning && now - lastReplayWarning < 10000L) return;
+        lastReplayWarning = now;
+        try { logDisplayFailure(t); } catch (Throwable ignored) { }
+    }
+
     private void replay(boolean position) {
         for (int i=0; i<latest.length; i++) {
             if (!replayPending[i] || latest[i] == null) continue;
@@ -151,7 +159,7 @@ public class GatedCombiService implements CombiBAPServiceNavi {
                 case 11: real.updateDestinationInfo((CombiBAPDestinationInfo)v[0]); break;
                 }
                 replayPending[i] = false;
-            } catch (Throwable t) { logDisplayFailure(t); }
+            } catch (Throwable t) { replayWarning(t); }
         }
     }
 

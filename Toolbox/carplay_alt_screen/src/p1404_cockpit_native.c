@@ -52,6 +52,7 @@ extern void *p1404_direct_stock_symbol_named(const char *name)
 #define NATIVE_STALL_SECONDS         3u
 #define NATIVE_EVENT_RETRY_SECONDS   2u
 #define NATIVE_EVENT_TIMEOUT_SECONDS 4u
+#define NATIVE_EVENT_REMOTE_FAILURES 3u
 #define P1404_P_WAIT                 0
 #define NATIVE_CONFIG_REFUSED_STATUS (-58796)
 #define P1404_RTLD_NOW                2
@@ -136,6 +137,7 @@ struct native_slot {
     uint32_t view_area_acked_seq;
     uint32_t view_area_frame_generation;
     uint32_t view_area_frame_count;
+    unsigned ui_remote_failures, keyframe_remote_failures, view_area_remote_failures;
     int ui_event_state;       /* 0=needed, 1=inflight, 2=accepted, 3=timed-out */
     int keyframe_event_state; /* 0=needed, 1=inflight, 2=accepted, 3=timed-out */
     int view_area_event_state;/* 0=needed, 1=inflight, 2=acknowledged */
@@ -1167,7 +1169,9 @@ void p1404_cockpit_native_recovery_result(void *receiver, void *stream,
     native_lock();
     slot = find_stream_locked(receiver, stream);
     if (slot && slot->generation == generation)
-        applied = alt111_recovery_result(&slot->recovery, event_seq);
+        applied = status != 0 && !response_received ?
+            alt111_recovery_submit_failed(&slot->recovery, event_seq) :
+            alt111_recovery_result(&slot->recovery, event_seq);
     native_unlock();
     altscreen_log("PHASE=ALT111_RECOVERY_RESULT receiver=%p stream=%p generation=%u request_seq=%u status=%d response_received=%d applied=%d picture_recovered=UNPROVEN stale_callback_fenced=1",
         receiver, stream, generation, event_seq, status, response_received, applied);
@@ -1342,7 +1346,7 @@ static void *native_monitor_worker(void *arg) {
         tap_resumed = live ? native_tap_retry_locked(slot) : 0;
         visible = live ? slot->visible : 0;
         pending = live ? slot->action_pending : 0;
-        route_ready = live && slot->ui_event_state == 2 &&
+        route_ready = live && slot->processing_live && slot->ui_event_state == 2 &&
                       slot->preconfig_rewritten && slot->config_ok &&
                       slot->first_real_frame_posted;
 
@@ -1376,6 +1380,7 @@ static void *native_monitor_worker(void *arg) {
                     slot->view_area_inflight_seq,
                     slot->view_area_target);
                 slot->view_area_event_state = 0;
+                slot->view_area_event_at = now;
                 slot->view_area_inflight_seq = 0;
                 slot->view_area_frame_pending = 0;
                 slot->view_area_frame_baseline_valid = 0;
@@ -1390,6 +1395,8 @@ static void *native_monitor_worker(void *arg) {
                                   native_measured_view_area_canvas(
                                       slot->config_width,
                                       slot->config_height));
+                    slot->view_area_remote_failures = 0;
+                    slot->view_area_event_at = 0;
                     slot->view_area_target = desired_view_area;
                     slot->view_area_applied = -1;
                     slot->view_area_event_state = 0;
@@ -1400,12 +1407,12 @@ static void *native_monitor_worker(void *arg) {
                 }
             }
 
-            if (slot->ui_event_state == 0 &&
+            if (slot->processing_live && slot->ui_event_state == 0 &&
                 (!slot->ui_event_at || now > slot->ui_event_at + NATIVE_EVENT_RETRY_SECONDS)) {
                 slot->ui_event_state = 1;
                 slot->ui_event_at = now;
                 event_kind = ALT111_EVENT_SHOW_UI;
-            } else if (slot->ui_event_state == 2 && slot->preconfig_rewritten &&
+            } else if (slot->processing_live && slot->ui_event_state == 2 && slot->preconfig_rewritten &&
                        slot->keyframe_event_state == 0 &&
                        (!slot->keyframe_event_at ||
                         now > slot->keyframe_event_at + NATIVE_EVENT_RETRY_SECONDS)) {
@@ -1419,7 +1426,10 @@ static void *native_monitor_worker(void *arg) {
                        (slot->view_area_target == 0 ||
                         slot->view_area_target == 1) &&
                        slot->view_area_applied != slot->view_area_target &&
-                       slot->view_area_event_state != 1) {
+                       slot->view_area_event_state != 1 &&
+                       slot->view_area_event_state != 3 &&
+                       (!slot->view_area_event_at ||
+                        now >= slot->view_area_event_at + NATIVE_EVENT_RETRY_SECONDS)) {
                 ++view_area_command_seq;
                 if (!view_area_command_seq) ++view_area_command_seq;
                 slot->view_area_event_state = 1;
@@ -1915,17 +1925,28 @@ void p1404_cockpit_native_event_result(void *receiver, void *stream,
     struct native_slot *slot;
     uint32_t state_generation = 0;
     int accepted = status == 0 && response_received;
-    int applied = 0;
+    int applied = 0, retry = 0;
+    uint64_t result_now = p1404_monotonic_seconds();
     native_lock();
     slot = find_stream_locked(receiver, stream);
     if (slot && slot->generation == generation) {
         state_generation = slot->state_generation;
         if (event_kind == ALT111_EVENT_SHOW_UI && slot->ui_event_state == 1) {
-            slot->ui_event_state = accepted ? 2 : 0;
+            if (accepted) slot->ui_remote_failures = 0;
+            else if (response_received) ++slot->ui_remote_failures;
+            slot->ui_event_state = accepted ? 2 :
+                slot->ui_remote_failures >= NATIVE_EVENT_REMOTE_FAILURES ? 3 : 0;
+            if (!accepted) slot->ui_event_at = result_now;
+            retry = slot->ui_event_state == 0;
             applied = 1;
         } else if (event_kind == ALT111_EVENT_FORCE_KEYFRAME &&
                    slot->keyframe_event_state == 1) {
-            slot->keyframe_event_state = accepted ? 2 : 0;
+            if (accepted) slot->keyframe_remote_failures = 0;
+            else if (response_received) ++slot->keyframe_remote_failures;
+            slot->keyframe_event_state = accepted ? 2 :
+                slot->keyframe_remote_failures >= NATIVE_EVENT_REMOTE_FAILURES ? 3 : 0;
+            if (!accepted) slot->keyframe_event_at = result_now;
+            retry = slot->keyframe_event_state == 0;
             applied = 1;
         }
     }
@@ -1934,10 +1955,10 @@ void p1404_cockpit_native_event_result(void *receiver, void *stream,
         alt_state_mark_native(receiver, state_generation,
                               ALT_STATE_NATIVE_UI_ACTIVE,
                               "showUI-alt-uuid-cluster-map-response-status0");
-    altscreen_log("PHASE=ALT111_EVENT_RESULT receiver=%p stream=%p generation=%u event=%d status=%d response_received=%d accepted=%d applied=%d retry=%d",
+    altscreen_log("PHASE=ALT111_EVENT_RESULT receiver=%p stream=%p generation=%u event=%d status=%d response_received=%d accepted=%d applied=%d retry=%d failure_origin=%s",
                   receiver, stream, generation, event_kind, status,
                   response_received, accepted && applied, applied,
-                  applied && !accepted);
+                  retry, response_received ? "remote" : "local");
 }
 
 
@@ -1951,7 +1972,7 @@ void p1404_cockpit_native_view_area_result(void *receiver, void *stream,
     uint64_t result_now = p1404_monotonic_seconds();
     int accepted = status == 0 && response_received;
     int applied = 0;
-    int stale = 0;
+    int stale = 0, retry = 0;
 
     native_lock();
     slot = find_stream_locked(receiver, stream);
@@ -1960,16 +1981,20 @@ void p1404_cockpit_native_view_area_result(void *receiver, void *stream,
         slot->view_area_event_state == 1 &&
         slot->view_area_inflight_seq == event_seq) {
         if (accepted) {
+            slot->view_area_remote_failures = 0;
             slot->view_area_applied = view_area_index;
             slot->view_area_event_state = 2;
             slot->view_area_acked_seq = event_seq;
             slot->view_area_ack_at = result_now;
             slot->view_area_frame_pending = 1;
         } else {
-            slot->view_area_event_state = 0;
+            if (response_received) ++slot->view_area_remote_failures;
+            slot->view_area_event_state = slot->view_area_remote_failures >= NATIVE_EVENT_REMOTE_FAILURES ? 3 : 0;
+            slot->view_area_event_at = result_now;
             slot->view_area_inflight_seq = 0;
             slot->view_area_frame_pending = 0;
             slot->view_area_frame_baseline_valid = 0;
+            retry = slot->view_area_event_state == 0;
         }
         applied = 1;
     } else {
@@ -1980,11 +2005,11 @@ void p1404_cockpit_native_view_area_result(void *receiver, void *stream,
     altscreen_log(
         "PHASE=ALT111_VIEWAREA_RESULT receiver=%p stream=%p generation=%u "
         "request_seq=%u viewAreaIndex=%d status=%d response_received=%d "
-        "acknowledged=%d target_still_current=%d stale_callback=%d retry=%d "
+        "acknowledged=%d target_still_current=%d stale_callback=%d retry=%d failure_origin=%s "
         "visual_proof=pending_fresh_type111_frame",
         receiver, stream, generation, event_seq, view_area_index, status,
         response_received, accepted && applied, applied, stale,
-        applied && !accepted);
+        retry, response_received ? "remote" : "local");
 }
 
 int p1404_cockpit_native_prepare_start(void *receiver) {

@@ -102,12 +102,16 @@ static void stream_ready_clear_locked(void) {
 static void tap_lock(void);
 static void tap_unlock(void);
 static volatile unsigned stream_ready_publish_busy;
+static uint32_t stream_ready_retry_at;
+static int stream_ready_retry_pending;
 static int stream_ready_publish(void) {
     char payload[192];
     uint32_t pid, generation, cookie, frames, sequence;
+    uint32_t retry_now = p1404_monotonic_us32();
     int fd = -1, n, result = 0, error = 0;
     ssize_t wr;
     if (__sync_lock_test_and_set(&stream_ready_publish_busy, 1u)) return 0;
+    if (stream_ready_retry_pending && (uint32_t)(retry_now - stream_ready_retry_at) < 2000000u) goto out;
     tap_lock();
     pid = (uint32_t)getpid();
     if (!g_stream || !g_generation || !g_h264 || !g_frame ||
@@ -145,8 +149,10 @@ static int stream_ready_publish(void) {
         (unsigned)pid, (unsigned)generation, (unsigned)cookie, (unsigned)frames, (unsigned)sequence);
     goto out;
 failed:
+    stream_ready_retry_pending = 1; stream_ready_retry_at = retry_now;
     altscreen_log("WARN PHASE=PRIVATE111_STREAM_READY marker_publish_failed errno=%d fail_open=YES", error);
 out:
+    if (result) stream_ready_retry_pending = 0;
     __sync_lock_release(&stream_ready_publish_busy);
     return result;
 }

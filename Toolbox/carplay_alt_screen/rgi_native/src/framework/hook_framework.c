@@ -97,6 +97,8 @@ typedef struct inject_item_s {
     uint16_t len;
     uint8_t link_session;
     uint32_t generation;
+    hook_inject_completion_fn completion;
+    uint64_t token;
 } inject_item_t;
 
 static pthread_mutex_t g_inject_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -212,12 +214,14 @@ static void* inject_worker_main(void* arg) {
                      "Dropped stale semantic frame gen=%u session=%u len=%u",
                      (unsigned)item.generation, (unsigned)item.link_session,
                      (unsigned)item.len);
+            if (item.completion) item.completion(item.token, HOOK_ERR_INIT);
             continue;
         }
 
         /* No hook/framework lock is held across the stock synchronous call. */
         ret = send_iap2(iap, (int)item.link_session, item.frame, (int)item.len);
         release_iap(iap);
+        if (item.completion) item.completion(item.token, ret == 0 ? HOOK_OK : HOOK_ERR_IO);
         if (ret != 0) {
             LOG_WARN(LOG_MODULE,
                      "Stock ICinemoIAP::SendIAP2 failed session=%u len=%u rc=%d",
@@ -239,7 +243,7 @@ static void* inject_worker_main(void* arg) {
 
 static hook_result_t inject_worker_enqueue(const uint8_t* frame, size_t frame_len,
                                            uint8_t link_session,
-                                           uint32_t generation) {
+                                           uint32_t generation, hook_inject_completion_fn completion, uint64_t token) {
     hook_result_t result = HOOK_OK;
 
     pthread_mutex_lock(&g_inject_lock);
@@ -263,6 +267,7 @@ static hook_result_t inject_worker_enqueue(const uint8_t* frame, size_t frame_le
                 item->len = (uint16_t)frame_len;
                 item->link_session = link_session;
                 item->generation = generation;
+                item->completion = completion; item->token = token;
                 g_inject_tail = (g_inject_tail + 1u) % INJECT_QUEUE_CAPACITY;
                 ++g_inject_count;
                 pthread_cond_signal(&g_inject_cond);
@@ -757,7 +762,7 @@ const hook_module_def_t* hook_framework_module_at(size_t index) {
 }
 
 /* Send an additional iAP2 frame without consuming the stock carrier. */
-hook_result_t hook_inject_frame(const uint8_t* frame, size_t frame_len) {
+static hook_result_t hook_inject_frame_tracked(const uint8_t* frame, size_t frame_len, hook_inject_completion_fn completion, uint64_t token) {
     uint8_t link_session;
     uint32_t generation;
     hook_result_t queued;
@@ -787,7 +792,7 @@ hook_result_t hook_inject_frame(const uint8_t* frame, size_t frame_len) {
     generation = g_fw.ctx.inject.generation;
     pthread_mutex_unlock(&g_fw.lock);
 
-    queued = inject_worker_enqueue(frame, frame_len, link_session, generation);
+    queued = inject_worker_enqueue(frame, frame_len, link_session, generation, completion, token);
     if (queued != HOOK_OK) {
         LOG_WARN(LOG_MODULE,
                  "Semantic injection queue rejected session=%u gen=%u len=%zu rc=%d",
@@ -795,6 +800,16 @@ hook_result_t hook_inject_frame(const uint8_t* frame, size_t frame_len) {
                  queued);
     }
     return queued;
+}
+
+hook_result_t hook_inject_frame(const uint8_t* frame, size_t len) {
+    return hook_inject_frame_tracked(frame, len, NULL, 0);
+}
+hook_result_t hook_inject_message_tracked(uint16_t msgid, const uint8_t* payload, size_t payload_len, hook_inject_completion_fn completion, uint64_t token) {
+    uint8_t frame[512];
+    size_t len = iap2_build_frame(frame, sizeof(frame), msgid, payload, payload_len);
+    if (!len) return HOOK_ERR_PARAM;
+    return hook_inject_frame_tracked(frame, len, completion, token);
 }
 
 hook_result_t hook_inject_message(uint16_t msgid, const uint8_t* payload, size_t payload_len) {

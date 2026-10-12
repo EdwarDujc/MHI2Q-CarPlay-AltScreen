@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
+export PATH
 # QNX /tmp can be a process-manager link to /dev/shmem. That namespace
 # supports flat files, but neither mkdir nor atomic rename. Use the boot-local
 # QNX4 ramdisk for directory locks and atomically replaced metadata. Never fall

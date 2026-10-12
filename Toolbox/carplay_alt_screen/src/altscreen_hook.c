@@ -206,6 +206,8 @@ struct bearer_tx_slot {
     int closing;
     int retired;
     int drain_started;
+    int drain_pending;
+    int drain_starting;
     int drain_cancel;
     int drain_done;
     int joining;
@@ -372,7 +374,7 @@ static void bearer_reap_done(void) {
         bearer_tx_lock();
         for (i = 0; i < BEARER_TX_SLOTS; ++i) {
             if (g_bearer_tx[i].active && g_bearer_tx[i].drain_started &&
-                g_bearer_tx[i].drain_done && !g_bearer_tx[i].joining) {
+                g_bearer_tx[i].drain_done && !g_bearer_tx[i].drain_starting && !g_bearer_tx[i].joining) {
                 slot = &g_bearer_tx[i];
                 slot->joining = 1;
                 thread = slot->drain_thread;
@@ -842,6 +844,28 @@ static void *bearer_drain_worker(void *opaque) {
     return NULL;
 }
 
+/* Retired slots keep their pinned descriptor until an owner can drain them.
+ * A create failure must not make libc close fail or lose retained wire bytes. */
+void altscreen_bearer_retry_close(void) {
+    int i, rc;
+    struct bearer_tx_slot *slot = NULL;
+    bearer_reap_done();
+    bearer_tx_lock();
+    for (i = 0; i < BEARER_TX_SLOTS; ++i) {
+        if (g_bearer_tx[i].active && g_bearer_tx[i].retired &&
+            g_bearer_tx[i].drain_pending && !g_bearer_tx[i].drain_started) {
+            slot = &g_bearer_tx[i]; slot->drain_pending = 0; slot->drain_started = 1; slot->drain_starting = 1; break;
+        }
+    }
+    bearer_tx_unlock();
+    if (!slot) return;
+    rc = real_thread_create ? real_thread_create(&slot->drain_thread, NULL, bearer_drain_worker, slot) : 11;
+    bearer_tx_lock();
+    slot->drain_starting = 0;
+    if (rc) { slot->drain_started = 0; slot->drain_pending = 1; }
+    bearer_tx_unlock();
+}
+
 #ifndef ALTSCREEN_DIRECT_PROXY
 ssize_t write(int fd, const void *buf, size_t n) {
 #ifndef ALTSCREEN_HOOK_HOST_TEST
@@ -1044,6 +1068,7 @@ static int bearer_fd_is_managed(int fd) {
 static __attribute__((unused)) int direct_bind_nme_io(void) { return 1; }
 #endif
 
+extern void p1404_alt111_firewall_maintenance_start(void);
 static __attribute__((noinline)) int bearer_close_forward(int fd) {
     struct bearer_tx_slot *slot;
     int nested, close_rc, create_rc, guard_index = -1, i;
@@ -1056,20 +1081,16 @@ static __attribute__((noinline)) int bearer_close_forward(int fd) {
     while ((nested = bearer_enter()) < 0) p1404_lock_wait_yield();
     if (!g_forward_ready) {
         if (!nested) bearer_leave();
-        bearer_set_error(11);
-        return -1;
+        return real_close(fd); /* No tracked ownership can exist before binding. */
     }
     if (!nested) bearer_reap_done();
 retry_close_lookup:
     bearer_tx_lock();
-    /* A PINNING operation still needs the original descriptor for dup. Never
-     * wait behind it and never close underneath it; the caller gets a genuine
-     * retryable failure. A completed pin removes this guard before blocking. */
+    /* Only wait for short dup publication, never the pinned blocking I/O. */
     if (bearer_raw_busy_locked(fd)) {
         bearer_tx_unlock();
-        if (!nested) bearer_leave();
-        bearer_set_error(11);
-        return -1;
+        p1404_lock_wait_yield();
+        goto retry_close_lookup;
     }
     slot = bearer_find_open_locked(fd);
     if (!slot) {
@@ -1113,29 +1134,30 @@ retry_close_lookup:
         return -1;
     }
     slot->closing = 1;
+    slot->drain_cancel = 0;
+    slot->drain_starting = 1;
     bearer_tx_unlock();
     if (!nested) bearer_leave();
 
-    /* Reserve the drain owner before closing the real descriptor.  The worker
-     * waits for retired/cancel publication, so it cannot drain early.  A
-     * create failure leaves the descriptor and generation fully retryable. */
+    /* Reserve the drain owner before closing the real descriptor. The worker
+     * waits for retired/cancel publication, so it cannot drain early. A create
+     * failure retains the pinned drain for maintenance; public close proceeds. */
     create_rc = real_thread_create ?
         real_thread_create(&slot->drain_thread, NULL, bearer_drain_worker, slot) : 11;
-    if (create_rc != 0) {
-        bearer_tx_lock();
-        slot->closing = 0;
-        bearer_tx_unlock();
-        altscreen_log("ERROR IAP2_CLOSE_DRAIN_WORKER generation=%u create_rc=%d real_close_calls=0",
-                      slot->generation, create_rc);
-        bearer_set_error(create_rc > 0 ? create_rc : 11);
-        return -1;
-    }
     bearer_tx_lock();
-    slot->drain_started = 1;
+    slot->drain_starting = 0;
+    slot->drain_started = create_rc == 0;
+    slot->drain_pending = create_rc != 0;
     bearer_tx_unlock();
+    if (create_rc != 0) {
+        altscreen_log("ERROR IAP2_CLOSE_DRAIN_WORKER generation=%u create_rc=%d public_fd_close_continues=1 pinned_drain_retained=1",
+                      slot->generation, create_rc);
+        p1404_alt111_firewall_maintenance_start();
+    }
 
     /* Exactly one real close, with no wait for busy libc I/O. */
     close_rc = real_close(fd);
+    create_rc = real_errno_ptr ? *real_errno_ptr() : 0;
     bearer_tx_lock();
     if (close_rc == 0) {
         /* The numeric descriptor may be reused as soon as close returns. Stop
@@ -1146,8 +1168,10 @@ retry_close_lookup:
     } else {
         slot->closing = 0;
         slot->drain_cancel = 1;
+        slot->drain_pending = 0;
     }
     bearer_tx_unlock();
+    if (real_errno_ptr) *real_errno_ptr() = create_rc;
     /* Once libc succeeds, no hook-side drain outcome may override it. */
     return close_rc;
 }

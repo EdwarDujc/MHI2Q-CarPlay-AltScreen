@@ -11,7 +11,7 @@
 #define ALT_BOOTSTRAP_ATTEMPTS 3u
 static struct {
     void *receiver;
-    int main_ready, sent, worker, pending, failed, show_ack, key_ack;
+    int main_ready, sent, worker, pending, failed, show_ack, key_ack, local_failed;
     uint32_t token, request;
 } bootstrap[8];
 static volatile unsigned bootstrap_guard;
@@ -50,7 +50,7 @@ static void bootstrap_event_result(void *receiver, uint32_t seq, int event,
         if (bootstrap[i].receiver != receiver || bootstrap[i].request != seq ||
             !bootstrap[i].pending) continue;
         applied = 1;
-        if (status || !response) bootstrap[i].failed = 1;
+        if (status || !response) { bootstrap[i].failed = 1; if (status && !response) bootstrap[i].local_failed = 1; }
         else if (event == ALT111_EVENT_SHOW_UI) bootstrap[i].show_ack = 1;
         else if (event == ALT111_EVENT_FORCE_KEYFRAME) bootstrap[i].key_ack = 1;
         break;
@@ -65,9 +65,9 @@ static int bootstrap_job_current_locked(const struct bootstrap_job *job) {
 }
 static void *bootstrap_worker(void *opaque) {
     struct bootstrap_job *job = opaque;
-    unsigned attempt, poll;
+    unsigned attempt, poll, local_failures = 0;
     uint32_t seq;
-    int rc, current, accepted = 0, failed;
+    int rc, current, accepted = 0, failed, local_failed;
     /* Submission runs after the outer SETUP/START lease has normally left.
      * Command admission still fences any concurrent stop before OEM access. */
     usleep(ALT_BOOTSTRAP_POLL_US);
@@ -78,7 +78,7 @@ static void *bootstrap_worker(void *opaque) {
         if (current && seq) {
             bootstrap[job->slot].request = seq;
             bootstrap[job->slot].pending = 1;
-            bootstrap[job->slot].failed = 0;
+            bootstrap[job->slot].failed = bootstrap[job->slot].local_failed = 0;
             bootstrap[job->slot].show_ack = bootstrap[job->slot].key_ack = 0;
         }
         bootstrap_unlock();
@@ -99,12 +99,19 @@ static void *bootstrap_worker(void *opaque) {
             bootstrap[job->slot].pending = 0; /* fence late completion */
             bootstrap[job->slot].sent = accepted;
         }
+        local_failed = current && (rc != 0 || bootstrap[job->slot].local_failed);
         bootstrap_unlock();
         altscreen_log("PHASE=ALT111_BOOTSTRAP_ATTEMPT receiver=%p request=%u attempt=%u submit_rc=%d remote_accepted=%d current=%d ack_timeout=%d picture_ready=UNPROVEN",
                       job->receiver, seq, attempt, rc, accepted, current, poll == ALT_BOOTSTRAP_ACK_POLLS);
         if (!current || accepted) break;
+        if (local_failed) {
+            /* Local admission failures are not phone attempts. Bound the worker
+             * lifetime separately; a later lifecycle notification may retry. */
+            if (++local_failures >= 10u) break;
+            --attempt;
+        }
         /* Bounded backoff without wall-clock/date assumptions. */
-        for (poll = 0; poll < 5u * attempt; ++poll) {
+        for (poll = 0; poll < 5u * (attempt ? attempt : 1u); ++poll) {
             usleep(ALT_BOOTSTRAP_POLL_US);
             bootstrap_lock(); current = bootstrap_job_current_locked(job); bootstrap_unlock();
             if (!current) break;
