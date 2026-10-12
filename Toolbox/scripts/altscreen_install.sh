@@ -245,6 +245,21 @@ if [ -d "$SD/install-transaction/active" ]; then
     fi
 fi
 if ! alts_ui_run /bin/sh "$SCRIPTS/altscreen_chain_test_universal.sh" backup-precheck; then
+    if alts_ui_log_has 'CONTROLLER_LOCK=REFUSED'; then
+        finish REFUSED 1 "The operation lock could not be acquired." \
+            "No previous installation was removed." \
+            "Wait for the other operation to finish, then retry." \
+            "If still refused, check the lock details in the log."
+    fi
+    if alts_ui_file_mismatch; then
+        finish REFUSED 1 "Normal file checks refused differing vehicle files." \
+            "Nothing new was installed. If this is the correct clean" \
+            "backup for the same model and exact firmware, save the" \
+            "current files and logs. Create MMI-Cockpit-Carplay/RESCUE_RESTORE" \
+            "on the SD card and run RESTORE ORIGINAL manually." \
+            "After RESCUE SUCCESS, remove the marker and fully reboot." \
+            "INSTALL never enables rescue automatically."
+    fi
     finish FAILED 1 "Stock backup does not match this head unit, or is damaged."         "No previous installation was removed."         "Use this head unit's matching stock backup; keep both backups."
 fi
 

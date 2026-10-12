@@ -669,7 +669,7 @@ if [ "$RESCUE_RESTORE" = 1 ]; then
   log "@@UI RESCUE MODE: stock binaries and configurations will be restored."
   log "RESCUE_RESTORE=ENABLED marker=$SD/RESCUE_RESTORE firmware_match=REQUIRED"
   run_detail /bin/sh "$VOLUME/Toolbox/scripts/altscreen_chain_test_universal.sh" rescue-precheck ||
-    fail "rescue backup incomplete or firmware does not match"
+    fail "rescue precheck failed; see the specific reason above"
   # Rescue uses a fresh snapshot of this head unit, never a borrowed or damaged
   # old transaction. Keep those old transactions as diagnostics, not payloads.
   preserve_rescue_history || fail "cannot preserve previous transaction history"

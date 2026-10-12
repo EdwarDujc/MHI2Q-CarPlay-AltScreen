@@ -155,6 +155,9 @@ alts_ui_run() {
     {
         alts_ui_errs=0
         while IFS= read -r alts_ui_line || [ -n "$alts_ui_line" ]; do
+            # Nested prechecks repeat the same VIN observation. Retain one
+            # warning of each kind per operation, including across INSTALL steps.
+            alts_ui_vehicle_warning_seen "$alts_ui_line" && continue
             alts_ui_log "$alts_ui_line"
             case "$alts_ui_line" in
                 "@@UI"*)
@@ -186,6 +189,18 @@ alts_ui_log_has() {
     grep -q "$1" "$ALTS_UI_LOG" 2>/dev/null
 }
 
+alts_ui_vehicle_warning_seen() {
+    case "$1" in
+        BACKUP_VEHICLE=WARNING*OTHER_VEHICLE*|DEVICE_SNAPSHOT_VEHICLE=WARNING*OTHER_VEHICLE*)
+            alts_ui_log_has '^BACKUP_VEHICLE=WARNING.*OTHER_VEHICLE' ||
+                alts_ui_log_has '^DEVICE_SNAPSHOT_VEHICLE=WARNING.*OTHER_VEHICLE' ;;
+        BACKUP_VEHICLE=WARNING*VIN_UNAVAILABLE*|DEVICE_SNAPSHOT_VEHICLE=WARNING*VIN_UNAVAILABLE*)
+            alts_ui_log_has '^BACKUP_VEHICLE=WARNING.*VIN_UNAVAILABLE' ||
+                alts_ui_log_has '^DEVICE_SNAPSHOT_VEHICLE=WARNING.*VIN_UNAVAILABLE' ;;
+        *) return 1 ;;
+    esac
+}
+
 alts_ui_rule() {
     alts_ui "=============================================="
 }
@@ -204,6 +219,14 @@ alts_ui_result() {
     alts_ui_rule
     alts_ui " RESULT: $alts_ui_status"
     for alts_ui_r in "$@"; do alts_ui " $alts_ui_r"; done
+    if alts_ui_log_has '^BACKUP_VEHICLE=WARNING.*OTHER_VEHICLE'; then
+        alts_ui " WARNING: using a backup from another vehicle."
+    elif alts_ui_log_has '^DEVICE_SNAPSHOT_VEHICLE=WARNING.*OTHER_VEHICLE'; then
+        alts_ui " WARNING: saved snapshot is from another vehicle."
+    elif alts_ui_log_has '^BACKUP_VEHICLE=WARNING.*VIN_UNAVAILABLE' ||
+         alts_ui_log_has '^DEVICE_SNAPSHOT_VEHICLE=WARNING.*VIN_UNAVAILABLE'; then
+        alts_ui " WARNING: vehicle identity could not be checked."
+    fi
     alts_ui " Log: $ALTS_UI_LOG_REL"
     alts_ui_rule
 }
@@ -235,6 +258,13 @@ alts_ui_identity_refused() {
     alts_ui_log_has 'BACKUP_IDENTITY=REFUSED' || alts_ui_log_has 'DEVICE_SNAPSHOT=REFUSED'
 }
 
+alts_ui_file_mismatch() {
+    alts_ui_log_has 'reason=STOCK_BINARY_MISMATCH' ||
+        alts_ui_log_has 'reason=SMARTPHONE_CONFIG_MISMATCH' ||
+        alts_ui_log_has 'reason=DIO_CONFIG_MISMATCH' ||
+        alts_ui_log_has 'reason=FIREWALL_CONFIG_MISMATCH'
+}
+
 # alts_ui_restore_result RC [PREVIOUS]  - RESULT block for RESTORE-style actions.
 # PREVIOUS is the ALTS_PREVIOUS value detected before the restore ran.
 alts_ui_restore_result() {
@@ -256,17 +286,50 @@ alts_ui_restore_result() {
             "The head unit is back to the stock configuration." \
             "Next: fully reboot the head unit." \
             "Keep this SD card: it holds the stock backup."
-    elif [ "$#" -ge 2 ] && [ -z "$2" ] && alts_ui_log_has 'RESTORE=REFUSED production_changed=NO' &&
-         ! alts_ui_log_has 'RESCUE_RESTORE=ENABLED'; then
-        alts_ui_result "NOTHING TO RESTORE" \
-            "No installation was found; the head unit already" \
-            "looks stock. Nothing was changed."
+    elif alts_ui_log_has 'reason=RESCUE_MARKER_REQUIRED'; then
+        alts_ui_result "RESCUE REQUIRED" \
+            "An earlier rescue is incomplete; its marker is missing." \
+            "Do NOT reboot. Put the empty file back on this SD card:" \
+            "MMI-Cockpit-Carplay/RESCUE_RESTORE" \
+            "Keep the complete matching backup, then run" \
+            "RESTORE ORIGINAL again. Keep the recovery logs."
+    elif alts_ui_log_has 'RESCUE_RESTORE=ENABLED' &&
+         { alts_ui_log_has '^ROLLBACK=FAIL' || alts_ui_log_has 'reason=COMMIT_INVALIDATION_FAILED'; }; then
+        alts_ui_result "RESCUE FAILED" \
+            "Rescue failed and rollback was incomplete." \
+            "Do NOT reboot or remove RESCUE_RESTORE." \
+            "Check the SD card is writable and the backup complete" \
+            "for this model and exact firmware. Keep the logs," \
+            "then run RESTORE ORIGINAL again with the marker present."
+    elif alts_ui_log_has 'RESCUE_RESTORE=ENABLED' && alts_ui_log_has '^ROLLBACK=PASS'; then
+        alts_ui_result "RESCUE FAILED" \
+            "Rescue failed. Files were rolled back to the pre-rescue state." \
+            "That state may still contain the original damaged files." \
+            "Keep RESCUE_RESTORE and the complete matching backup." \
+            "Check the failure in the log, correct it, then run" \
+            "RESTORE ORIGINAL again. A reboot alone will not repair files."
     elif alts_ui_log_has 'INSTALL_ROLLBACK=FAIL' || alts_ui_log_has '^ROLLBACK=FAIL' ||
          alts_ui_log_has 'reason=COMMIT_INVALIDATION_FAILED'; then
         alts_ui_result "FAILED" \
             "Restore stopped and its rollback was incomplete." \
             "Do NOT reboot. Keep this SD card and the log;" \
             "resolve the recovery failure before using the head unit."
+    elif alts_ui_log_has 'CONTROLLER_LOCK=REFUSED' &&
+         alts_ui_log_has 'RESTORE=REFUSED production_changed=NO'; then
+        alts_ui_result "REFUSED" \
+            "The operation lock could not be acquired." \
+            "No vehicle files were changed by this request." \
+            "Wait for the other operation to finish, then retry." \
+            "If still refused, check the lock details in the log." \
+            "This is not a backup or firmware mismatch."
+    elif alts_ui_file_mismatch; then
+        alts_ui_result "REFUSED" \
+            "Normal restore refused differing vehicle files." \
+            "If this is the correct clean backup for the same model" \
+            "and exact firmware, save current files and logs first." \
+            "Create the empty SD file MMI-Cockpit-Carplay/RESCUE_RESTORE," \
+            "then run RESTORE ORIGINAL to attempt rescue." \
+            "INSTALL never enables rescue; firmware checks remain required."
     elif alts_ui_identity_refused; then
         alts_ui_result "REFUSED" \
             "Backup/transaction identity verification failed." \
@@ -277,6 +340,13 @@ alts_ui_restore_result() {
         if alts_ui_log_has 'production_changed=RECOVERY_ONLY'; then
             alts_ui " Earlier recovery restored files; fully reboot to resume."
         fi
+    elif alts_ui_log_has 'RESCUE_RESTORE=ENABLED'; then
+        alts_ui_result "RESCUE FAILED" \
+            "Rescue did not complete. Read the failure reason in the log." \
+            "Keep RESCUE_RESTORE, both backups, and the logs." \
+            "Correct the reported problem, then run RESTORE ORIGINAL" \
+            "again with the complete matching backup and marker present." \
+            "Only RESCUE SUCCESS confirms a completed rescue."
     elif alts_ui_log_has 'recovery_required=YES'; then
         alts_ui_result "FAILED" \
             "An interrupted transaction could not be recovered." \

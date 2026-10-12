@@ -51,7 +51,14 @@ LOCK_HELD=0
 LIVE_DIRTY=0
 
 say(){ echo "$1"; }
-fail(){ echo "FAIL: $1" >&2; exit 1; }
+fail(){
+    case "$1" in
+        another\ AltScreen\ operation*) echo "CONTROLLER_LOCK=REFUSED reason=BUSY production_changed=NO" >&2 ;;
+        *operation\ lock*) echo "CONTROLLER_LOCK=REFUSED reason=LOCK_UNAVAILABLE production_changed=NO" >&2 ;;
+    esac
+    echo "FAIL: $1" >&2
+    exit 1
+}
 p(){ printf '%s%s\n' "$FIXED_ROOT" "$1"; }
 
 if [ "$TESTING" = 1 ]; then
