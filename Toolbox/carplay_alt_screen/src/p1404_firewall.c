@@ -159,6 +159,32 @@ static int is_our_rule(const char *line, size_t n, uint16_t port) {
     return tail == end;
 }
 
+/* Exactly the installer's line as pfctl -sr prints it, no other owner's rule. */
+static int is_static_rule(const char *line, size_t n) {
+    static const char rule[] = P1404_ALT111_STATIC_RULE;
+    const size_t len = sizeof(rule) - 1u;
+    const char *tail, *end = line + n;
+    if (n < len || memcmp(line, rule, len)) return 0;
+    tail = line + len;
+    while (tail < end && (*tail == ' ' || *tail == '\t' || *tail == '\r')) ++tail;
+    return tail == end;
+}
+int p1404_alt111_firewall_static_covers(const char *rules, uint16_t port) {
+    const char *cur, *nl;
+    if (!rules || port < P1404_ALT111_STATIC_PORT_FIRST ||
+        port >= P1404_ALT111_STATIC_PORT_FIRST + P1404_ALT111_STATIC_PORT_COUNT) return 0;
+    for (cur = rules; *cur; cur = nl + 1) {
+        size_t n;
+        nl = strchr(cur, '\n');
+        n = nl ? (size_t)(nl - cur) : strlen(cur);
+        /* A copy after the terminal block is ineffective. */
+        if (is_blocker(cur, n)) return 0;
+        if (is_static_rule(cur, n)) return 1;
+        if (!nl) break;
+    }
+    return 0;
+}
+
 static int append_bytes(char *out, size_t cap, size_t *used,
                         const char *src, size_t n) {
     if (!out || !used || !src || *used + n + 1u > cap) return 0;
@@ -380,7 +406,8 @@ done:
     return buf;
 }
 
-static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
+static int apply_rule_ex(uint16_t port, int enable, struct p1404_pf_lease *lease,
+                         int *ownership_conflict) {
     char *before = NULL, *after = NULL;
     char path[96];
     char *argv[] = { "pfctl", "-f", path, NULL };
@@ -423,7 +450,10 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
     if (!g_pf_owner_fds[port]) {
         g_pf_stage = "port_ownership";
         new_owner = pf_bind_token(port, 1);
-        if (new_owner < 0) goto done;
+        if (new_owner < 0) {
+            if (ownership_conflict) *ownership_conflict = 1;
+            goto done;
+        }
     }
     command_deadline = enable ? pf_now_ms() + PF_OPEN_HELPER_MS : deadline;
     if (command_deadline > deadline) command_deadline = deadline;
@@ -434,6 +464,12 @@ static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
         before = capture_rules(port, deadline);
     }
     if (!before) goto done;
+    if (enable && p1404_alt111_firewall_static_covers(before, port)) {
+        /* Not ours to add or remove: no reload, and cleanup preserves it. */
+        g_pf_stage = "static_rule_present";
+        ok = 1;
+        goto done;
+    }
     cap = strlen(before) + 256u;
     after = (char *)malloc(cap);
     if (!after) goto done;
@@ -520,6 +556,10 @@ done:
     return ok;
 }
 
+static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
+    return apply_rule_ex(port, enable, lease, NULL);
+}
+
 static void pf_retry_lock(void) {
     while (__sync_lock_test_and_set(&g_pf_retry_guard, 1u)) usleep(1000);
 }
@@ -598,11 +638,16 @@ static void *pf_maintenance_worker(void *unused) {
 
 int p1404_alt111_firewall_open(uint16_t port) { p1404_alt111_firewall_maintenance_start(); return apply_rule(port, 1, NULL); }
 int p1404_alt111_firewall_close(uint16_t port) { return apply_rule(port, 0, NULL); }
-int p1404_alt111_firewall_open_owned(uint16_t port, struct p1404_pf_lease *lease) {
+int p1404_alt111_firewall_open_owned_ex(uint16_t port, struct p1404_pf_lease *lease,
+                                        int *ownership_conflict) {
+    if (ownership_conflict) *ownership_conflict = 0;
     if (!lease) return 0;
     memset(lease, 0, sizeof(*lease));
     p1404_alt111_firewall_maintenance_start();
-    return apply_rule(port, 1, lease);
+    return apply_rule_ex(port, 1, lease, ownership_conflict);
+}
+int p1404_alt111_firewall_open_owned(uint16_t port, struct p1404_pf_lease *lease) {
+    return p1404_alt111_firewall_open_owned_ex(port, lease, NULL);
 }
 int p1404_alt111_firewall_close_owned(const struct p1404_pf_lease *lease) {
     struct p1404_pf_lease copy;
