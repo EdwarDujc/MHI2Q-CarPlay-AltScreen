@@ -319,6 +319,13 @@ static int rgd_find_slot_for_iap_index_no_touch(uint16_t idx) {
     return -1;
 }
 
+/*
+ * Lane event ids (0x5204 TLV1 / 0x5201 LaneGuidanceIndex) are a namespace of
+ * their own: iOS numbers them 0,1,2... per route while maneuver indices run
+ * ahead of them (field logs: lane events 2..6 alongside maneuvers 4..18).
+ * Never compare a lane id with a maneuver index.  Only the active lane event
+ * and lane events linked from active maneuvers are protected here.
+ */
 static bool rgd_is_active_lane_index(uint16_t lane_idx) {
     if ((g_rgd.update_cache.present & RGD_UPD_LANE_INDEX) &&
         g_rgd.update_cache.lane_guidance_index == lane_idx) {
@@ -328,7 +335,6 @@ static bool rgd_is_active_lane_index(uint16_t lane_idx) {
     if (!g_rgd.current_list_present) return false;
     for (uint16_t i = 0; i < g_rgd.current_list_count; i++) {
         int slot;
-        if (g_rgd.current_list[i] == lane_idx) return true;
         slot = rgd_find_slot_for_iap_index_no_touch(g_rgd.current_list[i]);
         if (slot < 0) continue;
         if ((g_rgd.slot_cache[slot].present & RGD_MAN_LINKED_LANE_INDEX) &&
@@ -408,13 +414,28 @@ static int rgd_lane_slot_for_iap_index(uint16_t idx, bool create) {
         }
     }
 
+    /* Cache full (32 lane events in one route).  iOS precaches future lane
+     * events ahead of activation and never resends them, so evict events
+     * already passed (id below the active one) first, then plain LRU. */
     int victim = -1;
     uint32_t best = UINT32_MAX;
-    for (int s = 0; s < MANEUVER_CACHE_SIZE; s++) {
-        if (rgd_is_active_lane_index(g_rgd.lane_slot_to_iap_idx[s])) continue;
-        if (g_rgd.lane_slot_seq[s] < best) {
-            best = g_rgd.lane_slot_seq[s];
-            victim = s;
+    if (g_rgd.update_cache.present & RGD_UPD_LANE_INDEX) {
+        for (int s = 0; s < MANEUVER_CACHE_SIZE; s++) {
+            if (g_rgd.lane_slot_to_iap_idx[s] >= g_rgd.update_cache.lane_guidance_index) continue;
+            if (rgd_is_active_lane_index(g_rgd.lane_slot_to_iap_idx[s])) continue;
+            if (g_rgd.lane_slot_seq[s] < best) {
+                best = g_rgd.lane_slot_seq[s];
+                victim = s;
+            }
+        }
+    }
+    if (victim < 0) {
+        for (int s = 0; s < MANEUVER_CACHE_SIZE; s++) {
+            if (rgd_is_active_lane_index(g_rgd.lane_slot_to_iap_idx[s])) continue;
+            if (g_rgd.lane_slot_seq[s] < best) {
+                best = g_rgd.lane_slot_seq[s];
+                victim = s;
+            }
         }
     }
     if (victim < 0) {
@@ -762,36 +783,6 @@ static bool rgd_lane_slot_has_data(int slot) {
            (RGD_LANE_GUIDANCE_INDEX | RGD_LANE_INFORMATIONS);
 }
 
-static bool rgd_prune_stale_lane_cache(void) {
-    int min_idx;
-    bool pruned = false;
-
-    if (!g_rgd.current_list_present) return false;
-    if (g_rgd.current_list_count == 0) return false;
-    if (g_rgd.last_route_state == RGD_STATE_REROUTING) return false;
-
-    min_idx = rgd_min_current_index();
-    if (min_idx < 0) return false;
-
-    for (int i = 0; i < MANEUVER_CACHE_SIZE; i++) {
-        uint16_t lane_idx = g_rgd.lane_slot_to_iap_idx[i];
-        if (lane_idx == 0xFFFF) continue;
-        if ((int)lane_idx >= min_idx) continue;
-        if ((g_rgd.update_cache.present & RGD_UPD_LANE_INDEX) &&
-            g_rgd.update_cache.lane_guidance_index == lane_idx) {
-            continue;
-        }
-
-        LOG_DEBUG(LOG_MODULE, "Pruning stale lane guidance slot %d (idx %u < current min %d)",
-                  i, (unsigned)lane_idx, min_idx);
-        g_rgd.lane_slot_to_iap_idx[i] = 0xFFFF;
-        g_rgd.lane_slot_seq[i] = 0;
-        g_rgd.lane_cache[i].present = 0;
-        pruned = true;
-    }
-    return pruned;
-}
-
 /*
  * Resolve linked-lane guidance references.
  * When a maneuver has RGD_MAN_LINKED_LANE_INDEX but no RGD_MAN_LANE_GUIDANCE,
@@ -984,16 +975,16 @@ static void write_bus_snapshot_from_cache(int extra_slot, const rgd_maneuver_t* 
     bool have_extra_slot = (extra_man && extra_man->present != 0 &&
                             extra_slot >= 0 && extra_slot < MANEUVER_CACHE_SIZE);
     bool have_lane_cache = false;
-    bool pruned_lane_slots;
 
-    pruned_lane_slots = rgd_prune_stale_lane_cache();
-
+    /* The lane cache is not pruned against maneuver indices: lane event ids
+     * are a separate namespace (see rgd_is_active_lane_index).  It is cleared
+     * by rgd_maneuver_map_reset on route end and bounded by LRU eviction. */
     for (int i = 0; i < MANEUVER_CACHE_SIZE; i++) {
         if (rgd_lane_slot_has_data(i)) {
             have_lane_cache = true;
         }
     }
-    if (present == 0 && !have_extra_slot && !have_lane_cache && !pruned_lane_slots) return;
+    if (present == 0 && !have_extra_slot && !have_lane_cache) return;
 
     /* NOTE on storage choice: a previous version used `static __thread`
      * 64K scratch to avoid per-snapshot malloc/free.  This crashed
@@ -1117,9 +1108,6 @@ static void write_bus_snapshot_from_cache(int extra_slot, const rgd_maneuver_t* 
                 g_rgd.highest_list_index = new_max;
         }
     }
-
-    if (rgd_prune_stale_lane_cache())
-        pruned_lane_slots = true;
 
     if (g_rgd.current_list_present) {
         if (g_rgd.current_list_count > 0) {
@@ -1394,8 +1382,12 @@ static bool rgd_message_handler(hook_context_t* ctx, const iap2_frame_t* frame) 
         }
         rgd_mark_first_response(frame->msgid);
 
-        LOG_INFO(LOG_MODULE, "Update: state=%u road=\"%s\" dest=\"%s\"",
-                 upd.route_state, upd.current_road, upd.destination);
+        LOG_INFO(LOG_MODULE, "Update: state=%u road=\"%s\" dest=\"%s\" lane_event=%d lane_showing=%d man_first=%d",
+                 upd.route_state, upd.current_road, upd.destination,
+                 (upd.present & RGD_UPD_LANE_INDEX) ? (int)upd.lane_guidance_index : -1,
+                 (upd.present & RGD_UPD_LANE_SHOWING) ? (int)upd.lane_guidance_showing : -1,
+                 ((upd.present & RGD_UPD_MANEUVER_LIST) && upd.maneuver_list_count > 0) ?
+                     (int)upd.maneuver_list[0] : -1);
 
         /*
          * Track update presence and handle route_state transitions.
