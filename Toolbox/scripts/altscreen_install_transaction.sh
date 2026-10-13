@@ -578,7 +578,21 @@ verify_installed(){
   verify_boot_backup ||
     { log "INSTALL_VERIFY=FAIL reason=BOOT_DIAGNOSTICS_BACKUP_INVALID"; return 1; }
 
-  log "INSTALL_VERIFY=PASS runtime=owned jar=project_owned_verified native_preload=verified diagnostics=verified sd_state=verified recovery_set=verified"
+  # The fixed type-111 port rule should sit ahead of the carplay0 terminal block
+  # (a pf.conf without that block filters nothing and needs no rule). The
+  # controller skips it when pfctl rejects the line; the hook then keeps its
+  # ephemeral port and runtime rule, so this is not an install failure.
+  firewall=static_fixed_port_6031
+  awk -v rule="pass in quick on carplay0 proto tcp from any to any port = 6031 allow-opts" '
+    {key=$0; sub(/\r$/,"",key)}
+    key==rule {found=1; exit}
+    key ~ /^[ \t]*block[ \t]+((drop|return)[ \t]+)?in[ \t]+(quick[ \t]+)?on[ \t]+carplay0[ \t]+all[ \t]*$/ {blocked=1; exit}
+    END{exit (found || !blocked) ? 0 : 1}
+  ' "$PF" || {
+    firewall=runtime_fallback
+    log "INSTALL_VERIFY_WARN reason=STATIC_FIREWALL_RULE_ABSENT port=6031 runtime_fallback=EPHEMERAL_EXACT_PORT"
+  }
+  log "INSTALL_VERIFY=PASS runtime=owned jar=project_owned_verified native_preload=verified diagnostics=verified sd_state=verified recovery_set=verified firewall=$firewall"
   return 0
 }
 fail(){

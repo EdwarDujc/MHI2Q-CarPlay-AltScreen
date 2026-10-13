@@ -159,32 +159,6 @@ static int is_our_rule(const char *line, size_t n, uint16_t port) {
     return tail == end;
 }
 
-/* Exactly the installer's line as pfctl -sr prints it, no other owner's rule. */
-static int is_static_rule(const char *line, size_t n) {
-    static const char rule[] = P1404_ALT111_STATIC_RULE;
-    const size_t len = sizeof(rule) - 1u;
-    const char *tail, *end = line + n;
-    if (n < len || memcmp(line, rule, len)) return 0;
-    tail = line + len;
-    while (tail < end && (*tail == ' ' || *tail == '\t' || *tail == '\r')) ++tail;
-    return tail == end;
-}
-int p1404_alt111_firewall_static_covers(const char *rules, uint16_t port) {
-    const char *cur, *nl;
-    if (!rules || port < P1404_ALT111_STATIC_PORT_FIRST ||
-        port >= P1404_ALT111_STATIC_PORT_FIRST + P1404_ALT111_STATIC_PORT_COUNT) return 0;
-    for (cur = rules; *cur; cur = nl + 1) {
-        size_t n;
-        nl = strchr(cur, '\n');
-        n = nl ? (size_t)(nl - cur) : strlen(cur);
-        /* A copy after the terminal block is ineffective. */
-        if (is_blocker(cur, n)) return 0;
-        if (is_static_rule(cur, n)) return 1;
-        if (!nl) break;
-    }
-    return 0;
-}
-
 static int append_bytes(char *out, size_t cap, size_t *used,
                         const char *src, size_t n) {
     if (!out || !used || !src || *used + n + 1u > cap) return 0;
@@ -248,6 +222,61 @@ int p1404_alt111_firewall_rewrite(const char *rules, uint16_t port, int enable,
     if (enable && !blocker) return 0; /* fail closed if expected terminal block moved */
     if (changed_out) *changed_out = changed;
     return 1;
+}
+
+static int is_static_rule(const char *line, size_t n, uint16_t port) {
+    static const char *const words[] = {
+        "pass", "in", "quick", "on", "carplay0", "proto", "tcp",
+        "from", "any", "to", "any", "port", "="
+    };
+    const char *p = line, *end = line + n;
+    char number[8];
+    unsigned i;
+    for (i = 0; i < sizeof(words) / sizeof(words[0]); ++i)
+        if (!pf_token(&p, end, words[i])) return 0;
+    snprintf(number, sizeof(number), "%u", (unsigned)port);
+    if (!pf_token(&p, end, number) || !pf_token(&p, end, "allow-opts")) return 0;
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) ++p;
+    return p == end;
+}
+
+int p1404_alt111_static_rule_present(const char *conf, uint16_t port) {
+    const char *cur, *nl;
+    if (!conf || !port) return 0;
+    for (cur = conf; *cur; cur = nl + 1) {
+        size_t n;
+        nl = strchr(cur, '\n');
+        n = nl ? (size_t)(nl - cur) : strlen(cur);
+        if (is_blocker(cur, n)) return 0; /* a pass after the block is dead */
+        if (is_static_rule(cur, n, port)) return 1;
+        if (!nl) break;
+    }
+    return 0;
+}
+
+int p1404_alt111_static_rule_loaded(uint16_t port) {
+    char *buf;
+    size_t used = 0;
+    ssize_t got;
+    int fd, present = 0;
+    fd = open("/etc/pf.conf", O_RDONLY);
+    if (fd < 0) return 0;
+    buf = (char *)malloc(PF_CAPTURE_MAX + 1u);
+    if (buf) {
+        do {
+            got = read(fd, buf + used, PF_CAPTURE_MAX - used);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) break;
+            used += (size_t)got;
+        } while (used < PF_CAPTURE_MAX);
+        if (got >= 0 && used < PF_CAPTURE_MAX && !memchr(buf, 0, used)) {
+            buf[used] = 0;
+            present = p1404_alt111_static_rule_present(buf, port);
+        }
+        free(buf);
+    }
+    close(fd);
+    return present;
 }
 
 /* QNX spawnp maps stdio and the transaction socket into the helper. If the
@@ -406,8 +435,8 @@ done:
     return buf;
 }
 
-static int apply_rule_ex(uint16_t port, int enable, struct p1404_pf_lease *lease,
-                         int *ownership_conflict) {
+static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease,
+                      int *port_conflict) {
     char *before = NULL, *after = NULL;
     char path[96];
     char *argv[] = { "pfctl", "-f", path, NULL };
@@ -416,6 +445,7 @@ static int apply_rule_ex(uint16_t port, int enable, struct p1404_pf_lease *lease
     int changed = 0, ok = 0, n, saved, write_ok, new_owner = -1, reload_attempted = 0;
     uint32_t uncertain_generation = 0;
     uint64_t start, deadline, command_deadline;
+    if (port_conflict) *port_conflict = 0;
     if (!port || (!enable && lease && !lease->generation)) return 0;
     start = pf_now_ms();
     if (!start) { errno = EIO; return 0; }
@@ -446,12 +476,16 @@ static int apply_rule_ex(uint16_t port, int enable, struct p1404_pf_lease *lease
         goto done;
     }
     /* An old process cannot reload/remove a port held by another process.
-     * A same-process reopen reuses the kernel token and advances generation. */
+     * A same-process reopen reuses the kernel token and advances generation.
+     * The kernel picks the TCP listener port without checking UDP, so an
+     * unrelated UDP socket on the same number (seen on P1201: udp *.65495)
+     * also lands here. Nothing has run yet; report it so the caller can move
+     * the listener to another port instead of failing the session. */
     if (!g_pf_owner_fds[port]) {
         g_pf_stage = "port_ownership";
         new_owner = pf_bind_token(port, 1);
         if (new_owner < 0) {
-            if (ownership_conflict) *ownership_conflict = 1;
+            if (enable && port_conflict) *port_conflict = 1;
             goto done;
         }
     }
@@ -464,12 +498,6 @@ static int apply_rule_ex(uint16_t port, int enable, struct p1404_pf_lease *lease
         before = capture_rules(port, deadline);
     }
     if (!before) goto done;
-    if (enable && p1404_alt111_firewall_static_covers(before, port)) {
-        /* Not ours to add or remove: no reload, and cleanup preserves it. */
-        g_pf_stage = "static_rule_present";
-        ok = 1;
-        goto done;
-    }
     cap = strlen(before) + 256u;
     after = (char *)malloc(cap);
     if (!after) goto done;
@@ -556,10 +584,6 @@ done:
     return ok;
 }
 
-static int apply_rule(uint16_t port, int enable, struct p1404_pf_lease *lease) {
-    return apply_rule_ex(port, enable, lease, NULL);
-}
-
 static void pf_retry_lock(void) {
     while (__sync_lock_test_and_set(&g_pf_retry_guard, 1u)) usleep(1000);
 }
@@ -617,7 +641,7 @@ static void *pf_maintenance_worker(void *unused) {
             }
             pf_retry_unlock();
             if (lease.generation) {
-                int ok = apply_rule(lease.port, 0, &lease);
+                int ok = apply_rule(lease.port, 0, &lease, NULL);
                 if (ok) {
                     pf_retry_lock();
                     if (g_pf_cleanup_pending[lease.port] == lease.generation) { g_pf_cleanup_pending[lease.port] = 0; --g_pf_cleanup_count; }
@@ -636,15 +660,15 @@ static void *pf_maintenance_worker(void *unused) {
     return NULL;
 }
 
-int p1404_alt111_firewall_open(uint16_t port) { p1404_alt111_firewall_maintenance_start(); return apply_rule(port, 1, NULL); }
-int p1404_alt111_firewall_close(uint16_t port) { return apply_rule(port, 0, NULL); }
+int p1404_alt111_firewall_open(uint16_t port) { p1404_alt111_firewall_maintenance_start(); return apply_rule(port, 1, NULL, NULL); }
+int p1404_alt111_firewall_close(uint16_t port) { return apply_rule(port, 0, NULL, NULL); }
 int p1404_alt111_firewall_open_owned_ex(uint16_t port, struct p1404_pf_lease *lease,
-                                        int *ownership_conflict) {
-    if (ownership_conflict) *ownership_conflict = 0;
+                                        int *port_conflict) {
+    if (port_conflict) *port_conflict = 0;
     if (!lease) return 0;
     memset(lease, 0, sizeof(*lease));
     p1404_alt111_firewall_maintenance_start();
-    return apply_rule_ex(port, 1, lease, ownership_conflict);
+    return apply_rule(port, 1, lease, port_conflict);
 }
 int p1404_alt111_firewall_open_owned(uint16_t port, struct p1404_pf_lease *lease) {
     return p1404_alt111_firewall_open_owned_ex(port, lease, NULL);
@@ -654,7 +678,7 @@ int p1404_alt111_firewall_close_owned(const struct p1404_pf_lease *lease) {
     if (!lease) return 0;
     copy = *lease;
     {
-        int ok = apply_rule(copy.port, 0, &copy);
+        int ok = apply_rule(copy.port, 0, &copy, NULL);
         if (!ok) pf_queue_cleanup(copy.port, copy.generation);
         return ok;
     }

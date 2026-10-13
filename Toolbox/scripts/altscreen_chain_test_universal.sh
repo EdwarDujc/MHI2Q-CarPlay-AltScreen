@@ -130,9 +130,11 @@ TXN_ROOT="$STAGING_ROOT/controller-txn"
 TXN_DIR="$TXN_ROOT/universal.$$"
 FIREWALL_BEGIN="# BEGIN ALTSCREEN TYPE111 FIREWALL"
 FIREWALL_END="# END ALTSCREEN TYPE111 FIREWALL"
-# Must stay byte-identical to P1404_ALT111_STATIC_RULE in p1404_firewall.h.
-FIREWALL_RULE="pass in quick on carplay0 proto tcp from any to any port 7200:7203 allow-opts"
-FIREWALL_ANCHOR="block drop in quick on carplay0 all"
+# Fixed type-111 data port; must match P1404_ALT111_FIXED_DATA_PORT in the hook.
+# The hook falls back to an ephemeral port and a runtime rule without it.
+FIREWALL_STATIC_PORT=6031
+FIREWALL_STATIC_RULE="pass in quick on carplay0 proto tcp from any to any port = $FIREWALL_STATIC_PORT allow-opts"
+BOOT_PF_CONF=/etc/pf.conf
 PFCTL_CANDIDATES="/armle/sbin/pfctl /mnt/app/armle/sbin/pfctl /sbin/pfctl"
 
 locate_first(){
@@ -469,8 +471,8 @@ verify_config_context() (
             say "BACKUP_IDENTITY=REFUSED reason=DIO_CONFIG_MISMATCH production_changed=NO"; return 1;
         }
     fi
-    # Either side may carry the project block: a legacy backup, or the live
-    # static aperture added by install. Everything else must match.
+    # Either side may carry the project block (old backups, or the static
+    # fixed-port rule on an installed system); compare the stock remainder.
     strip_firewall_block "$pf" > "$TXN_DIR/identity.pf" || return 1
     strip_firewall_block "$(p "$LIVE_PF_CONF")" > "$TXN_DIR/identity.pf.live" || return 1
     same_bytes "$pf" "$(p "$LIVE_PF_CONF")" ||
@@ -654,36 +656,63 @@ firewall_block_parses() (
     "$pfctl" -n -f "$2" >/dev/null 2>&1 && { echo PFCTL_REJECTED; return 1; }
     echo PFCTL_INCONCLUSIVE
 )
-# The stock DHCP path reloads pf.conf whenever LTE changes address and drops
-# every runtime rule, cutting the cluster stream mid-drive. Own one static
-# aperture for the hook's fixed ports, right before the stock carplay0
-# terminal block. Without that anchor, or if pfctl rejects the result, keep
-# the file free of it: the hook then uses its exact runtime rule as before.
-install_firewall_block() (
+# Replace any previous project block (including the retired persistent high-port
+# range) with one exact static rule just ahead of the carplay0 terminal block.
+# startup.sh copies /mnt/system/etc to /etc and loads it at boot. The stock
+# DHCP path also reloads pf.conf when LTE changes address, dropping every
+# runtime rule; a rule in the file survives those reloads.
+install_static_firewall_rule() (
     live=$(p "$LIVE_PF_CONF")
     ensure_dirs "$TXN_DIR" || return 1
-    clean="$TXN_DIR/pf.clean"; static="$TXN_DIR/pf.static"
+    clean="$TXN_DIR/pf.clean"; staged="$TXN_DIR/pf.static"
     strip_firewall_block "$live" > "$clean" || return 1
-    target=$clean; reason=ANCHOR_NOT_FOUND; syntax=NOT_CHECKED
-    if awk -v anchor="$FIREWALL_ANCHOR" -v begin="$FIREWALL_BEGIN" -v rule="$FIREWALL_RULE" -v end="$FIREWALL_END" '
-          { key=$0; sub(/\r$/,"",key); gsub(/^[ \t]+|[ \t]+$/,"",key) }
-          !done && key==anchor { print begin; print rule; print end; done=1 }
-          { print }
-          END { exit done ? 0 : 3 }
-        ' "$clean" > "$static"; then
-        if syntax=$(firewall_block_parses "$static" "$clean"); then target=$static; else reason=$syntax; fi
+    awk -v begin="$FIREWALL_BEGIN" -v end="$FIREWALL_END" -v rule="$FIREWALL_STATIC_RULE" '
+      {
+        key=$0; sub(/\r$/,"",key)
+        if(!done && key ~ /^[ \t]*block[ \t]+((drop|return)[ \t]+)?in[ \t]+(quick[ \t]+)?on[ \t]+carplay0[ \t]+all[ \t]*$/) {
+          print begin; print rule; print end; done=1
+        }
+        print
+      }
+      END{if(!done)exit 9}
+    ' "$clean" > "$staged"
+    rc=$?
+    if [ "$rc" = 9 ]; then
+        # No terminal block: carplay0 is not filtered, nothing to open.
+        rm -f "$staged"
+        if ! same_bytes "$clean" "$live"; then
+            stage_and_publish "$clean" "$live" 644 || { rm -f "$clean"; return 1; }
+        fi
+        rm -f "$clean" "$STATE_DIR/FIREWALL_PATCHED"
+        say "FIREWALL=TYPE111_STATIC_SKIPPED reason=no_carplay0_terminal_block runtime_fallback=EPHEMERAL_EXACT_PORT"
+        return 0
     fi
-    if ! same_bytes "$target" "$live"; then
-        stage_and_publish "$target" "$live" 644 || { rm -f "$clean" "$static"; return 1; }
+    [ "$rc" = 0 ] || { rm -f "$clean" "$staged"; return 1; }
+    if ! syntax=$(firewall_block_parses "$staged" "$clean"); then
+        rm -f "$staged"
+        if ! same_bytes "$clean" "$live"; then
+            stage_and_publish "$clean" "$live" 644 || { rm -f "$clean"; return 1; }
+        fi
+        rm -f "$clean" "$STATE_DIR/FIREWALL_PATCHED"
+        say "FIREWALL=TYPE111_STATIC_SKIPPED reason=$syntax runtime_fallback=EPHEMERAL_EXACT_PORT"
+        return 0
     fi
-    same_bytes "$target" "$live" || { rm -f "$clean" "$static"; return 1; }
-    rm -f "$clean" "$static" "$STATE_DIR/FIREWALL_PATCHED"
-    if [ "$target" = "$static" ]; then
-        say "FIREWALL=TYPE111_STATIC_FIXED_PORTS interface=carplay0 ports=7200:7203 syntax=$syntax runtime_fallback=EXACT_PORT"
-    else
-        say "FIREWALL=TYPE111_RUNTIME_EXACT_PORT static_block=SKIPPED reason=$reason"
+    if ! same_bytes "$staged" "$live"; then
+        stage_and_publish "$staged" "$live" 644 || { rm -f "$clean" "$staged"; return 1; }
     fi
+    rm -f "$clean" "$staged" "$STATE_DIR/FIREWALL_PATCHED"
+    static_firewall_rule_present "$live" || return 1
+    say "FIREWALL=TYPE111_STATIC_FIXED_PORT port=$FIREWALL_STATIC_PORT interface=carplay0 syntax=$syntax effective=AFTER_REBOOT runtime_fallback=EPHEMERAL_EXACT_PORT"
 )
+static_firewall_rule_present(){
+    awk -v begin="$FIREWALL_BEGIN" -v rule="$FIREWALL_STATIC_RULE" '
+      {key=$0; sub(/\r$/,"",key)}
+      key==begin {inside=1; next}
+      inside && key==rule {found=1; exit}
+      key ~ /^[ \t]*block[ \t]+((drop|return)[ \t]+)?in[ \t]+(quick[ \t]+)?on[ \t]+carplay0[ \t]+all[ \t]*$/ {exit}
+      END{exit found ? 0 : 1}
+    ' "$1"
+}
 restore_firewall() (
     [ -f "$FIREWALL_COMPLETE" ] || return 0
     verify_firewall_backup || return 1
@@ -820,7 +849,7 @@ cmd_install(){
             /bin/sh "$RGI_CONFIG" verify "$(p "$LIVE_JSON_DIO")" >/dev/null || goto_fail=1
         fi
     fi
-    if [ "${goto_fail:-0}" != 1 ]; then install_firewall_block || goto_fail=1; fi
+    if [ "${goto_fail:-0}" != 1 ]; then install_static_firewall_rule || goto_fail=1; fi
     if [ "${goto_fail:-0}" = 1 ]; then
         say "FAIL: universal deployment failed; restoring originals"
         restore_originals || say "WARN: rollback restore failed"
@@ -942,16 +971,22 @@ cmd_status(){
     echo "DISPLAY_START_POLICY=STREAM_DRIVEN stable_decoded_frames=2 fixed_delay=NONE"
     echo "FIRMWARE_PROFILE=UNIVERSAL"
     echo "RESOLVER_POLICY=dynamic_symbols_plus_ELF_relocations fail_open=YES"
-    if grep -Fxq "$FIREWALL_RULE" "$(p "$LIVE_PF_CONF")" 2>/dev/null; then
-        echo "FIREWALL_TYPE111=STATIC_7200_7203 runtime_fallback=EXACT_PORT"
+    if static_firewall_rule_present "$(p "$LIVE_PF_CONF")"; then
+        echo "FIREWALL_TYPE111=STATIC_FIXED_PORT port=$FIREWALL_STATIC_PORT runtime_fallback=EPHEMERAL_EXACT_PORT"
     else
-        echo "FIREWALL_TYPE111=RUNTIME_EXACT_PORT static_block=ABSENT"
+        echo "FIREWALL_TYPE111=RUNTIME_EXACT_PORT static_rule=ABSENT"
+    fi
+    # The hook trusts the boot copy; pfctl shows what is enforced right now.
+    if static_firewall_rule_present "$(p "$BOOT_PF_CONF")" 2>/dev/null; then
+        echo "FIREWALL_TYPE111_BOOT=LOADED source=$BOOT_PF_CONF"
+    else
+        echo "FIREWALL_TYPE111_BOOT=NOT_LOADED reboot_required_if_just_installed=YES"
     fi
     if pfctl_rel=$(locate_first "$PFCTL_CANDIDATES"); then
-        if "$(p "$pfctl_rel")" -sr 2>/dev/null | grep -Fxq "$FIREWALL_RULE"; then
+        if "$(p "$pfctl_rel")" -sr 2>/dev/null | grep -Fxq "$FIREWALL_STATIC_RULE"; then
             echo "FIREWALL_TYPE111_LIVE=PRESENT"
         else
-            echo "FIREWALL_TYPE111_LIVE=ABSENT reboot_required_if_just_installed=YES"
+            echo "FIREWALL_TYPE111_LIVE=ABSENT"
         fi
     fi
 }

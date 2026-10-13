@@ -400,8 +400,21 @@ static int build_stream111_response(const void *alt_descriptor,
     return 1;
 }
 
-/* requested_port 0 asks the stock helper for an ephemeral port. */
-static int open_stock_equivalent_listener(void *receiver, int requested_port,
+/* Ephemeral TCP ports are chosen without regard to UDP, while the PF owner
+ * token is UDP on the same number. A few fresh ports are enough to step past an
+ * unrelated UDP socket; each retry costs one bind and runs no pfctl. */
+#define ALT111_LISTENER_PORT_ATTEMPTS 4u
+
+static void close_conflict_listeners(int *fds, unsigned *count) {
+    unsigned i;
+    for (i = 0; i < *count; ++i)
+        if (fds[i] >= 0 && be.close_fn) be.close_fn(fds[i]);
+    *count = 0;
+}
+
+/* requested_port 0 asks the stack for an ephemeral port; a positive port must
+ * be bound exactly or the open fails. */
+static int open_stock_equivalent_listener(void *receiver, uint16_t requested_port,
                                           uint16_t *port_out, int *fd_out) {
     int port = 0, fd = -1, rc, af;
     if (port_out) *port_out = 0;
@@ -410,10 +423,11 @@ static int open_stock_equivalent_listener(void *receiver, int requested_port,
     af = ((const uint8_t *)receiver)[RECEIVER_PEER_FAMILY_OFF];
 
     rc = be.server_socket_open(af, P1404_SOCK_STREAM, P1404_IPPROTO_TCP,
-                               requested_port, &port, ALT111_RECEIVE_BUFFER_BYTES, &fd);
-    altscreen_log("PHASE=STREAM_111_LISTENER_OPEN_RETURN rc=%d requested_port=%d bound_port=%d advertised_port=%d fd=%d helper=ServerSocketOpen recvbuf=%d af=%d",
-                  rc, requested_port, port, port, fd, ALT111_RECEIVE_BUFFER_BYTES, af);
-    if (rc != 0 || fd < 0 || port <= 0 || port > 65535) {
+                               (int)requested_port, &port, ALT111_RECEIVE_BUFFER_BYTES, &fd);
+    altscreen_log("PHASE=STREAM_111_LISTENER_OPEN_RETURN rc=%d requested_port=%u bound_port=%d advertised_port=%d fd=%d helper=ServerSocketOpen recvbuf=%d af=%d",
+                  rc, (unsigned)requested_port, port, port, fd, ALT111_RECEIVE_BUFFER_BYTES, af);
+    if (rc != 0 || fd < 0 || port <= 0 || port > 65535 ||
+        (requested_port && port != (int)requested_port)) {
         if (fd >= 0 && be.close_fn) be.close_fn(fd);
         return 0;
     }
@@ -570,43 +584,6 @@ static int backend_runtime_prereqs_ready(void) {
            be.socket_fn && be.connect_fn && be.close_fn;
 }
 
-/* Prefer the installer's static pf.conf ports: the stock DHCP path reloads
- * pf.conf and silently drops any runtime rule, cutting the live stream. A busy
- * or foreign-owned fixed port moves to the next one; after the last, the
- * original ephemeral port with its exact runtime rule remains the fallback. */
-static int open_listener_with_firewall(void *receiver, void *session,
-                                       uint16_t *port_out, int *fd_out,
-                                       struct p1404_pf_lease *firewall) {
-    unsigned i;
-    for (i = 0; i <= P1404_ALT111_STATIC_PORT_COUNT; ++i) {
-        int requested = i < P1404_ALT111_STATIC_PORT_COUNT ?
-                        (int)(P1404_ALT111_STATIC_PORT_FIRST + i) : 0;
-        int conflict = 0, firewall_errno, fd = -1;
-        uint16_t port = 0;
-        if (!open_stock_equivalent_listener(receiver, requested, &port, &fd)) {
-            if (requested) continue;
-            return 0;
-        }
-        /* The helper may answer a fixed request with an ephemeral port. */
-        if (requested && port != (uint16_t)requested) requested = 0;
-        if (p1404_alt111_firewall_open_owned_ex(port, firewall, &conflict)) {
-            altscreen_log("PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=OK scope=%s before_response=1",
-                          receiver, session, (unsigned)port,
-                          requested ? "carplay0_tcp_fixed_port" : "carplay0_tcp_exact_port");
-            *port_out = port;
-            *fd_out = fd;
-            return 1;
-        }
-        firewall_errno = errno;
-        altscreen_log("ERROR PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=FAILED errno=%d ownership_conflict=%d response_advertised=0 next=%s",
-                      receiver, session, (unsigned)port, firewall_errno, conflict,
-                      requested && conflict ? "next_port" : "fail_closed");
-        if (be.close_fn) be.close_fn(fd);
-        if (!requested || !conflict) return 0;
-    }
-    return 0;
-}
-
 static int prepare_setup(void *receiver,
                          const void *alt_descriptor,
                          void **alt_screen_session,
@@ -614,7 +591,9 @@ static int prepare_setup(void *receiver,
     void *session = NULL, *response = NULL;
     uint64_t connection_id = 0;
     uint16_t port = 0;
-    int listen_fd = -1, rc, firewall_open = 0;
+    int listen_fd = -1, rc, firewall_open = 0, static_rule;
+    int conflict_fds[ALT111_LISTENER_PORT_ATTEMPTS];
+    unsigned conflict_count = 0;
     struct p1404_pf_lease firewall = {0, 0};
 
     if (alt_screen_session) *alt_screen_session = NULL;
@@ -633,9 +612,43 @@ static int prepare_setup(void *receiver,
 
     if (!prepare_start_context(receiver, session, alt_descriptor, &connection_id))
         goto fail_local;
-    if (!open_listener_with_firewall(receiver, session, &port, &listen_fd, &firewall))
+    /* Primary: the fixed port INSTALL opened in pf.conf, as stock does for its
+     * own streams, so SETUP runs no PF command. Fallback: ephemeral port plus
+     * the runtime exact-port rule, for a missing rule or an occupied port. */
+    static_rule = p1404_alt111_static_rule_loaded(P1404_ALT111_FIXED_DATA_PORT);
+    if (static_rule &&
+        open_stock_equivalent_listener(receiver, P1404_ALT111_FIXED_DATA_PORT, &port, &listen_fd)) {
+        altscreen_log("PHASE=STREAM_111_DATA_PORT receiver=%p session=%p mode=fixed port=%u static_rule=1 pf_runtime=0",
+                      receiver, session, (unsigned)port);
+        goto listener_ready;
+    }
+    altscreen_log("WARN PHASE=STREAM_111_DATA_PORT receiver=%p session=%p mode=dynamic_fallback fixed_port=%u static_rule=%d reason=%s",
+                  receiver, session, (unsigned)P1404_ALT111_FIXED_DATA_PORT, static_rule,
+                  static_rule ? "fixed_port_unavailable" : "static_rule_not_loaded");
+    for (;;) {
+        int port_conflict = 0, firewall_errno;
+        if (!open_stock_equivalent_listener(receiver, 0, &port, &listen_fd)) goto fail_local;
+        if (p1404_alt111_firewall_open_owned_ex(port, &firewall, &port_conflict)) break;
+        firewall_errno = errno;
+        if (port_conflict && conflict_count + 1u < ALT111_LISTENER_PORT_ATTEMPTS) {
+            /* Keep the rejected listener bound until a usable port is found so
+             * the stack cannot hand the same number straight back. */
+            altscreen_log("WARN PHASE=STREAM_111_PORT_CONFLICT receiver=%p session=%p port=%u attempt=%u action=reopen_listener",
+                          receiver, session, (unsigned)port, conflict_count + 1u);
+            conflict_fds[conflict_count++] = listen_fd;
+            listen_fd = -1;
+            continue;
+        }
+        altscreen_log("ERROR PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=FAILED errno=%d port_conflict=%d attempts=%u response_advertised=0 fail_closed=1",
+                      receiver, session, (unsigned)port, firewall_errno, port_conflict,
+                      conflict_count + 1u);
         goto fail_local;
+    }
+    close_conflict_listeners(conflict_fds, &conflict_count);
     firewall_open = 1;
+    altscreen_log("PHASE=STREAM_111_FIREWALL_ADD receiver=%p session=%p port=%u result=OK scope=carplay0_tcp_exact_port before_response=1",
+                  receiver, session, (unsigned)port);
+listener_ready:
     if (!build_stream111_response(alt_descriptor, port, &response)) goto fail_local;
 
     if (!pair_install(receiver, session, listen_fd, port, connection_id, &firewall)) {
@@ -660,6 +673,7 @@ fail_local:
                       fw_rc ? "OK" : "FAILED");
     }
     if (listen_fd >= 0 && be.close_fn) be.close_fn(listen_fd);
+    close_conflict_listeners(conflict_fds, &conflict_count);
     /* No pair exists, so clean the partial ScreenSession here and clear output to
      * prevent orchestration from attempting a second teardown. */
     if (session && be.stop) be.stop(session);
