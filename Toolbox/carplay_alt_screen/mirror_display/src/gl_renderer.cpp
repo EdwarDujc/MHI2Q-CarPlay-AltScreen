@@ -321,8 +321,9 @@ bool GlRenderer::upload_logo_rgba(const unsigned char *rgba,
         glGenTextures(1, &logo_texture_);
         if (!logo_texture_) return false;
         glBindTexture(GL_TEXTURE_2D, logo_texture_);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        /* Texel-for-pixel; nearest keeps every source pixel exact. */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -471,10 +472,10 @@ void GlRenderer::draw_texture(GLuint texture, const GLfloat *vertices,
 
 void GlRenderer::draw_logo(float opacity, bool over_carplay) {
     if (!ready_ || !logo_texture_) return;
-    /* 70% of the visible 1440x455 plane, centered on both axes. */
+    /* The 1440x455 logo frame fills the whole 1440x455 plane 1:1, unscaled. */
     static const GLfloat logo_vertices[] = {
-        -0.7f,  0.7f, -0.7f, -0.7f,
-         0.7f,  0.7f,  0.7f, -0.7f
+        -1.0f,  1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f,  1.0f, -1.0f
     };
     if (opacity < 0.0f) opacity = 0.0f;
     if (opacity > 1.0f) opacity = 1.0f;
@@ -483,10 +484,9 @@ void GlRenderer::draw_logo(float opacity, bool over_carplay) {
     glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_BLEND);
     if (over_carplay && texture_width_ && texture_height_) {
-        /* Fade the entire black-backed intro, including the area around the
-         * smaller video, so CarPlay does not appear there ahead of the fade. */
+        /* Cross-fade the whole plane from the intro to CarPlay. */
         glEnable(GL_BLEND);
-        /* Keep the entire displayable opaque, including the black padding.
+        /* Keep the entire displayable opaque, including black intro pixels.
          * Fading framebuffer alpha would expose OEM gray layers underneath. */
         glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
         draw_texture(texture_, vertices_, swap_rb_, 1.0f - opacity);

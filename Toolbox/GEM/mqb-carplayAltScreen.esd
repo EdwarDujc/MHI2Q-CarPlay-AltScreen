@@ -1,11 +1,11 @@
 ###########################################################################################
-# MMI-Cockpit-Carplay V3.7Fix4 - CarPlay Private111 Direct Display / Context80
+# MMI-Cockpit-Carplay V3.7 Fix5 - CarPlay Private111 Direct Display / Context80
 ###########################################################################################
 screen "MMI-Cockpit-Carplay" Customization
 
 keyValue
     value   String sys 0x00000000 0
-    label   "Version: V3.7Fix4"
+    label   "Version: V3.7 Fix5"
     poll    0
 
 keyValue
@@ -25,14 +25,6 @@ script
 script
    value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/install_mmi_cockpit_carplay_with_rgi.sh"
    label   "INSTALL WITH RGI"
-
-script
-   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/status_mmi_cockpit_carplay_test.sh"
-   label   "STATUS"
-
-script
-   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/finish_mmi_cockpit_carplay_test.sh"
-   label   "STORE LOGS + RESTORE"
 
 script
    value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/stop_mmi_cockpit_carplay_test.sh"

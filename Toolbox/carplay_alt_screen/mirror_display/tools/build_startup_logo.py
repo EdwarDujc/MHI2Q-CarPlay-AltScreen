@@ -3,6 +3,7 @@
 
 The car has no FFmpeg dependency.  Only the top 455 lines of the 1440x542
 source are visible on its displayable 3 plane, so the clipped bottom is omitted.
+The kept 1440x455 frame is shown 1:1 on the whole plane (no scaling).
 """
 
 import argparse
@@ -23,7 +24,9 @@ MAGIC = b"ALTLOGO1"
 def build(source: Path, output: Path) -> None:
     command = [
         "ffmpeg", "-v", "error", "-i", str(source),
-        "-vf", f"fps={FPS},crop={WIDTH}:{HEIGHT}:0:0",
+        # Convert before cropping: on yuv420p input FFmpeg rounds an odd crop
+        # height (455) down to the chroma grid (454).
+        "-vf", f"fps={FPS},format=rgba,crop={WIDTH}:{HEIGHT}:0:0",
         "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1",
     ]
     process = subprocess.Popen(command, stdout=subprocess.PIPE)

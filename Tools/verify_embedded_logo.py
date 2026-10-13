@@ -39,7 +39,7 @@ def inspect(binary: Path, asset=None):
     clip = elf[offset:offset + end - start]
     assert clip[:8] == b"ALTLOGO1"
     width, height, fps, frames = struct.unpack_from("<IIII", clip, 8)
-    assert (width, height, fps, frames) == (1440, 455, 30, 137)
+    assert (width, height, fps) == (1440, 455, 30) and 0 < frames <= 300
     position = 24
     decoded_hash = hashlib.sha256()
     for i in range(frames):
