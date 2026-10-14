@@ -12,6 +12,14 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 **V3.7Fix5 update: the secondary-display data port is fixed at 6031 and written into the head unit's firewall configuration, fixing the black cluster at cold start and cluster dropouts when LTE changes IP; at cold start the secondary display waits until the stock cluster map has loaded; fixes RGI lane guidance disappearing mid-route; the startup video now fills the cluster 1:1; the green menu is trimmed to three entries, and boot logs are saved to the SD card automatically.**
 
+> [!CAUTION]
+> **Disclaimer**
+>
+> - Every change this project makes is written to, and affects, the head unit's system files. Installing, updating, starting and restoring all modify stock programs, configuration and firewall rules, and can affect how the head unit works.
+> - This project is provided free of charge and "as is", without warranty of any kind (see sections 15 and 16 of the GPL-3.0).
+> - **By using this project you accept these risks and take full responsibility for the consequences. The authors and contributors accept no liability for any problem arising from using, installing, restoring or modifying this project, including but not limited to head-unit faults, malfunctions, failure to boot, data loss, voided warranty, or any other direct or indirect damage.**
+> - If you do not agree to these terms, do not install or use this project.
+
 > [!NOTE]
 > **Sister project: MMI Mirror**  
 > If you want to mirror the **entire MMI center display** instead of using the native CarPlay secondary display, see:  
