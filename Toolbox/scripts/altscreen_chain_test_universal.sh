@@ -118,6 +118,8 @@ COMPLETE_MARKER="$BACKUP_DIR/COMPLETE"
 FIREWALL_BACKUP_DIR="$BACKUP_ROOT/firewall-original"
 FIREWALL_BACKUP_FILE="$FIREWALL_BACKUP_DIR/pf.conf"
 FIREWALL_COMPLETE="$FIREWALL_BACKUP_DIR/COMPLETE"
+FIREWALL_VARIANT_BACKUP_DIR="$BACKUP_ROOT/firewall-variants-original"
+FIREWALL_VARIANT_COMPLETE="$FIREWALL_VARIANT_BACKUP_DIR/COMPLETE"
 UNIVERSAL_BACKUP_DIR="$BACKUP_ROOT/universal-hook-original"
 UNIVERSAL_BACKUP_FILE="$UNIVERSAL_BACKUP_DIR/libcarplay_altscreen.so"
 UNIVERSAL_BACKUP_COMPLETE="$UNIVERSAL_BACKUP_DIR/COMPLETE"
@@ -479,6 +481,15 @@ verify_config_context() (
     same_bytes "$TXN_DIR/identity.pf" "$TXN_DIR/identity.pf.live" || {
         say "BACKUP_IDENTITY=REFUSED reason=FIREWALL_CONFIG_MISMATCH production_changed=NO"; return 1;
     }
+    if [ -f "$FIREWALL_VARIANT_COMPLETE" ]; then
+        pf_dir=$(dirname -- "$(p "$LIVE_PF_CONF")")
+        while IFS= read -r name; do
+            strip_firewall_block "$pf_dir/$name" > "$TXN_DIR/identity.pf.variant" 2>/dev/null &&
+            same_bytes "$FIREWALL_VARIANT_BACKUP_DIR/$name" "$TXN_DIR/identity.pf.variant" || {
+                say "BACKUP_IDENTITY=REFUSED reason=FIREWALL_VARIANT_MISMATCH file=$name production_changed=NO"; return 1;
+            }
+        done < "$FIREWALL_VARIANT_BACKUP_DIR/list" || return 1
+    fi
     say "BACKUP_CONTEXT=PASS config_changes=PROJECT_ONLY"
 )
 verify_backup_context() (
@@ -610,6 +621,50 @@ backup_firewall() (
     touch "$FIREWALL_COMPLETE" || return 1
     verify_firewall_backup
 )
+# Per-uplink rule sets beside pf.conf (pf.ecm0.conf, pf.ppp0.conf,
+# pf.mlan0.conf). Once the LTE data link is up the stock network service loads
+# the matching one in place of pf.conf, so the type-111 rule must be in each.
+pf_variant_names(){
+    for f in "$(dirname -- "$(p "$LIVE_PF_CONF")")"/pf.*.conf; do
+        [ -f "$f" ] || continue
+        case "${f##*/}" in *[!A-Za-z0-9._-]*) continue ;; esac
+        echo "${f##*/}"
+    done
+    return 0
+}
+verify_firewall_variant_backup() (
+    dir=$FIREWALL_VARIANT_BACKUP_DIR
+    [ -f "$FIREWALL_VARIANT_COMPLETE" ] && [ -f "$dir/list" ] || return 1
+    while IFS= read -r name; do
+        case "$name" in pf.*.conf) ;; *) return 1 ;; esac
+        case "$name" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+        [ -s "$dir/$name" ] && [ -f "$dir/$name.cksum" ] || return 1
+        [ "$(cksum < "$dir/$name")" = "$(cat "$dir/$name.cksum")" ] || return 1
+        case "$(cat "$dir/$name.mode" 2>/dev/null)" in 644|755) ;; *) return 1 ;; esac
+    done < "$dir/list" || return 1
+)
+# Stock bytes are the live file without the project block, so a unit that
+# already carries the rule still yields its original. A directory left without
+# COMPLETE holds only such derived copies and is rebuilt.
+backup_firewall_variants() (
+    if [ -f "$FIREWALL_VARIANT_COMPLETE" ]; then verify_firewall_variant_backup; return $?; fi
+    pf_dir=$(dirname -- "$(p "$LIVE_PF_CONF")")
+    tmp="${FIREWALL_VARIANT_BACKUP_DIR}.new.$$"
+    rm -rf "$FIREWALL_VARIANT_BACKUP_DIR" "$tmp" 2>/dev/null || return 1
+    ensure_dirs "$tmp" || return 1
+    : > "$tmp/list" || { rm -rf "$tmp"; return 1; }
+    for name in $(pf_variant_names); do
+        mode=644; [ ! -x "$pf_dir/$name" ] || mode=755
+        strip_firewall_block "$pf_dir/$name" > "$tmp/$name" && [ -s "$tmp/$name" ] &&
+            cksum < "$tmp/$name" > "$tmp/$name.cksum" &&
+            echo "$mode" > "$tmp/$name.mode" &&
+            echo "$name" >> "$tmp/list" || { rm -rf "$tmp"; return 1; }
+    done
+    mv "$tmp" "$FIREWALL_VARIANT_BACKUP_DIR" || { rm -rf "$tmp"; return 1; }
+    touch "$FIREWALL_VARIANT_COMPLETE" || return 1
+    verify_firewall_variant_backup || return 1
+    say "FIREWALL_VARIANT_BACKUP=CREATED files=$(tr '\n' ',' < "$FIREWALL_VARIANT_BACKUP_DIR/list")"
+)
 
 verify_universal_backup() (
     [ -f "$UNIVERSAL_BACKUP_COMPLETE" ] && [ -f "$UNIVERSAL_BACKUP_DIR/present" ] || return 1
@@ -656,15 +711,12 @@ firewall_block_parses() (
     "$pfctl" -n -f "$2" >/dev/null 2>&1 && { echo PFCTL_REJECTED; return 1; }
     echo PFCTL_INCONCLUSIVE
 )
-# Replace any previous project block (including the retired persistent high-port
-# range) with one exact static rule just ahead of the carplay0 terminal block.
-# startup.sh copies /mnt/system/etc to /etc and loads it at boot. The stock
-# DHCP path also reloads pf.conf when LTE changes address, dropping every
-# runtime rule; a rule in the file survives those reloads.
-install_static_firewall_rule() (
-    live=$(p "$LIVE_PF_CONF")
-    ensure_dirs "$TXN_DIR" || return 1
-    clean="$TXN_DIR/pf.clean"; staged="$TXN_DIR/pf.static"
+# Stage $1 into $2 with any previous project block (including the retired
+# persistent high-port range) replaced by one exact static rule just ahead of
+# the carplay0 terminal block; $2.clean gets the file without a block. Prints
+# STATIC <pfctl verdict>, or SKIPPED <reason> with $2 equal to $2.clean.
+stage_static_firewall_file() (
+    live=$1; staged=$2; clean="$2.clean"
     strip_firewall_block "$live" > "$clean" || return 1
     awk -v begin="$FIREWALL_BEGIN" -v end="$FIREWALL_END" -v rule="$FIREWALL_STATIC_RULE" '
       {
@@ -679,30 +731,63 @@ install_static_firewall_rule() (
     rc=$?
     if [ "$rc" = 9 ]; then
         # No terminal block: carplay0 is not filtered, nothing to open.
-        rm -f "$staged"
-        if ! same_bytes "$clean" "$live"; then
-            stage_and_publish "$clean" "$live" 644 || { rm -f "$clean"; return 1; }
-        fi
-        rm -f "$clean" "$STATE_DIR/FIREWALL_PATCHED"
-        say "FIREWALL=TYPE111_STATIC_SKIPPED reason=no_carplay0_terminal_block runtime_fallback=EPHEMERAL_EXACT_PORT"
-        return 0
+        cat "$clean" > "$staged" || return 1
+        echo "SKIPPED no_carplay0_terminal_block"; return 0
     fi
-    [ "$rc" = 0 ] || { rm -f "$clean" "$staged"; return 1; }
+    [ "$rc" = 0 ] || return 1
     if ! syntax=$(firewall_block_parses "$staged" "$clean"); then
-        rm -f "$staged"
-        if ! same_bytes "$clean" "$live"; then
-            stage_and_publish "$clean" "$live" 644 || { rm -f "$clean"; return 1; }
-        fi
-        rm -f "$clean" "$STATE_DIR/FIREWALL_PATCHED"
-        say "FIREWALL=TYPE111_STATIC_SKIPPED reason=$syntax runtime_fallback=EPHEMERAL_EXACT_PORT"
+        cat "$clean" > "$staged" || return 1
+        echo "SKIPPED $syntax"; return 0
+    fi
+    echo "STATIC $syntax"
+)
+publish_firewall_file() (
+    src=$1; dst=$2; mode=$3
+    same_bytes "$src" "$dst" || stage_and_publish "$src" "$dst" "$mode"
+)
+# startup.sh copies /mnt/system/etc to /etc and loads it at boot. The stock
+# DHCP path reloads pf.conf when LTE changes address, and once the LTE data
+# link is up the network service loads pf.ecm0.conf (pf.ppp0.conf,
+# pf.mlan0.conf) in its place; each reload drops every runtime rule, but a rule
+# in the files survives. The hook binds the fixed port only when /etc/pf.conf
+# carries the rule, so it goes into pf.conf and every variant, or into none.
+install_static_firewall_rule() (
+    live=$(p "$LIVE_PF_CONF"); pf_dir=$(dirname -- "$live")
+    ensure_dirs "$TXN_DIR" || return 1
+    names=$(pf_variant_names) || return 1
+    cleanup(){ rm -f "$TXN_DIR/pf.static" "$TXN_DIR/pf.static.clean" "$TXN_DIR"/pf.variant.*; }
+    verdict=$(stage_static_firewall_file "$live" "$TXN_DIR/pf.static") || { cleanup; return 1; }
+    reason=; syntax=; patched=
+    case "$verdict" in
+        "STATIC "*) syntax=${verdict#STATIC } ;;
+        "SKIPPED "*) reason=${verdict#SKIPPED } ;;
+        *) cleanup; return 1 ;;
+    esac
+    for name in $names; do
+        v=$(stage_static_firewall_file "$pf_dir/$name" "$TXN_DIR/pf.variant.$name") || { cleanup; return 1; }
+        case "$v" in
+            "STATIC "*) patched="$patched${patched:+,}$name" ;;
+            "SKIPPED no_carplay0_terminal_block") ;;
+            "SKIPPED "*) [ -n "$reason" ] || reason="${v#SKIPPED } file=$name" ;;
+            *) cleanup; return 1 ;;
+        esac
+    done
+    suffix=; [ -z "$reason" ] || suffix=.clean
+    publish_firewall_file "$TXN_DIR/pf.static$suffix" "$live" 644 || { cleanup; return 1; }
+    for name in $names; do
+        mode=644; [ ! -x "$pf_dir/$name" ] || mode=755
+        publish_firewall_file "$TXN_DIR/pf.variant.$name$suffix" "$pf_dir/$name" "$mode" || { cleanup; return 1; }
+    done
+    cleanup; rm -f "$STATE_DIR/FIREWALL_PATCHED"
+    if [ -n "$reason" ]; then
+        say "FIREWALL=TYPE111_STATIC_SKIPPED reason=$reason runtime_fallback=EPHEMERAL_EXACT_PORT"
         return 0
     fi
-    if ! same_bytes "$staged" "$live"; then
-        stage_and_publish "$staged" "$live" 644 || { rm -f "$clean" "$staged"; return 1; }
-    fi
-    rm -f "$clean" "$staged" "$STATE_DIR/FIREWALL_PATCHED"
     static_firewall_rule_present "$live" || return 1
-    say "FIREWALL=TYPE111_STATIC_FIXED_PORT port=$FIREWALL_STATIC_PORT interface=carplay0 syntax=$syntax effective=AFTER_REBOOT runtime_fallback=EPHEMERAL_EXACT_PORT"
+    for name in $(echo "$patched" | tr ',' ' '); do
+        static_firewall_rule_present "$pf_dir/$name" || return 1
+    done
+    say "FIREWALL=TYPE111_STATIC_FIXED_PORT port=$FIREWALL_STATIC_PORT interface=carplay0 syntax=$syntax variants=${patched:-NONE} effective=AFTER_REBOOT runtime_fallback=EPHEMERAL_EXACT_PORT"
 )
 static_firewall_rule_present(){
     awk -v begin="$FIREWALL_BEGIN" -v rule="$FIREWALL_STATIC_RULE" '
@@ -713,7 +798,31 @@ static_firewall_rule_present(){
       END{exit found ? 0 : 1}
     ' "$1"
 }
+# Variants come back from their backup; one carrying the project block without
+# a backup (installed before variants were backed up) is stripped to stock.
+restore_firewall_variants() (
+    pf_dir=$(dirname -- "$(p "$LIVE_PF_CONF")"); dir=$FIREWALL_VARIANT_BACKUP_DIR
+    if [ -f "$FIREWALL_VARIANT_COMPLETE" ]; then
+        verify_firewall_variant_backup || return 1
+        while IFS= read -r name; do
+            stage_and_publish "$dir/$name" "$pf_dir/$name" "$(cat "$dir/$name.mode")" || return 1
+            same_bytes "$dir/$name" "$pf_dir/$name" || return 1
+        done < "$dir/list" || return 1
+    fi
+    for name in $(pf_variant_names); do
+        grep -Fqx "$FIREWALL_BEGIN" "$pf_dir/$name" 2>/dev/null || continue
+        ensure_dirs "$TXN_DIR" || return 1
+        strip_firewall_block "$pf_dir/$name" > "$TXN_DIR/pf.variant.restore" || return 1
+        mode=644; [ ! -x "$pf_dir/$name" ] || mode=755
+        stage_and_publish "$TXN_DIR/pf.variant.restore" "$pf_dir/$name" "$mode" || return 1
+        same_bytes "$TXN_DIR/pf.variant.restore" "$pf_dir/$name" || return 1
+        rm -f "$TXN_DIR/pf.variant.restore"
+        say "FIREWALL_VARIANT_RESTORE=STRIPPED file=$name backup=ABSENT"
+    done
+    return 0
+)
 restore_firewall() (
+    restore_firewall_variants || return 1
     [ -f "$FIREWALL_COMPLETE" ] || return 0
     verify_firewall_backup || return 1
     stage_and_publish "$FIREWALL_BACKUP_FILE" "$(p "$LIVE_PF_CONF")" 644 || return 1
@@ -809,6 +918,7 @@ cmd_install(){
     check_sources || { lock_release; return 1; }
     backup_originals || { say "FAIL: original backup failed"; lock_release; return 1; }
     backup_firewall || { say "FAIL: firewall backup failed"; lock_release; return 1; }
+    backup_firewall_variants || { say "FAIL: firewall variant backup failed"; lock_release; return 1; }
     backup_universal_hook || { say "FAIL: universal hook backup failed"; lock_release; return 1; }
     mount_rw "$(p /mnt/app)" || { lock_release; return 1; }; MR_APP=1
     mount_rw "$(p /mnt/system)" || { finish_mounts; lock_release; return 1; }; MR_SYS=1
@@ -917,6 +1027,9 @@ cmd_restore_precheck(){
     if [ "$rc" = 0 ]; then
         verify_firewall_backup || { say "FAIL: firewall original backup unavailable or damaged"; rc=1; }
     fi
+    if [ "$rc" = 0 ] && [ -f "$FIREWALL_VARIANT_COMPLETE" ]; then
+        verify_firewall_variant_backup || { say "FAIL: firewall variant backup damaged"; rc=1; }
+    fi
     if [ "$rc" = 0 ]; then
         say "RESTORE_PRECHECK=PASS profile=UNIVERSAL production_changed=NO"
     else
@@ -976,6 +1089,14 @@ cmd_status(){
     else
         echo "FIREWALL_TYPE111=RUNTIME_EXACT_PORT static_rule=ABSENT"
     fi
+    pf_dir=$(dirname -- "$(p "$LIVE_PF_CONF")")
+    for name in $(pf_variant_names); do
+        if static_firewall_rule_present "$pf_dir/$name"; then
+            echo "FIREWALL_TYPE111_VARIANT file=$name static=PRESENT"
+        else
+            echo "FIREWALL_TYPE111_VARIANT file=$name static=ABSENT"
+        fi
+    done
     # The hook trusts the boot copy; pfctl shows what is enforced right now.
     if static_firewall_rule_present "$(p "$BOOT_PF_CONF")" 2>/dev/null; then
         echo "FIREWALL_TYPE111_BOOT=LOADED source=$BOOT_PF_CONF"

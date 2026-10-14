@@ -112,6 +112,7 @@ INSTALL_TXN="$SD/install-transaction/active"
 NATIVE="$BACKUP/original"
 RUNTIME="$(p /mnt/app/root/carplay-altscreen)"; STAGE="$(p /mnt/app/root/.carplay-altscreen.new)"; PREV="$(p /mnt/app/root/.carplay-altscreen.previous)"
 SI="$(p /mnt/system/etc/eso/production/smartphone_integrator.json)"; DIO="$(p /mnt/system/etc/eso/production/dio_manager.json)"; PF="$(p /mnt/system/etc/pf.conf)"
+PF_DIR="$(p /mnt/system/etc)"
 JAR="$(p /mnt/app/eso/hmi/lsd/jars/carplay_hook.jar)"; LEGACY_HOOK="$(p /mnt/app/root/hooks/libcarplay_altscreen.so)"; LIBTARGET="$(p /mnt/app/root/lib-target)"
 if ! ensure_dirs "$SD/logs" "$SD/restore-transaction"; then
   echo "RESTORE=REFUSED reason=SD_NOT_WRITABLE production_changed=NO"
@@ -474,6 +475,23 @@ validate_device_identity(){
   return 0
 }
 
+# Per-uplink pf rule sets (pf.ecm0.conf, pf.ppp0.conf, pf.mlan0.conf) that the
+# controller restores beside pf.conf. A transaction without the list predates
+# them.
+snap_pf_variants(){
+  : > "$TXN/pf_variants.list" || return 1
+  for f in "$PF_DIR"/pf.*.conf; do
+    [ -f "$f" ] || continue
+    n=${f##*/}
+    case "$n" in *[!A-Za-z0-9._-]*) continue ;; esac
+    snap_file "$f" "pf_variant_$n" || return 1
+    if [ -x "$f" ]; then echo 755; else echo 644; fi > "$TXN/meta/pf_variant_$n.mode" || return 1
+    echo "$n" >> "$TXN/pf_variants.list" || return 1
+  done
+}
+pf_variant_snapshots(){
+  [ ! -f "$TXN/pf_variants.list" ] || cat "$TXN/pf_variants.list"
+}
 validate_restore_snapshot(){
   validate_device_identity || return 1
   s=$(cat "$TXN/startup.path" 2>/dev/null || true)
@@ -483,6 +501,10 @@ validate_restore_snapshot(){
   esac
   for n in startup.sh smartphone_integrator.json dio_manager.json pf.conf carplay_hook.jar legacy_hook libtarget_libairplay.so libtarget_libairplax.so libtarget_libNmeBaseClasses.so; do
     validate_file_snapshot "$n" || { log "RESTORE_SNAPSHOT_INTEGRITY=FAIL kind=file name=$n"; return 1; }
+  done
+  for n in $(pf_variant_snapshots); do
+    case "$n" in pf.*.conf) ;; *) log "RESTORE_SNAPSHOT_INTEGRITY=FAIL kind=pf_variant_name"; return 1 ;; esac
+    validate_file_snapshot "pf_variant_$n" || { log "RESTORE_SNAPSHOT_INTEGRITY=FAIL kind=file name=pf_variant_$n"; return 1; }
   done
   lp=0; la=0
   [ ! -f "$TXN/libtarget.dir_present" ] || lp=1
@@ -503,6 +525,9 @@ verify_restore_rollback(){
   verify_file_snapshot "$SI" smartphone_integrator.json || return 1
   verify_file_snapshot "$DIO" dio_manager.json || return 1
   verify_file_snapshot "$PF" pf.conf || return 1
+  for n in $(pf_variant_snapshots); do
+    verify_file_snapshot "$PF_DIR/$n" "pf_variant_$n" || return 1
+  done
   verify_file_snapshot "$JAR" carplay_hook.jar || return 1
   verify_file_snapshot "$LEGACY_HOOK" legacy_hook || return 1
   for n in libairplay.so libairplax.so libNmeBaseClasses.so; do
@@ -548,6 +573,7 @@ snapshot(){
   snap_file "$SI" smartphone_integrator.json || return 1
   snap_file "$DIO" dio_manager.json || return 1
   snap_file "$PF" pf.conf || return 1
+  snap_pf_variants || return 1
   snap_file "$JAR" carplay_hook.jar || return 1
   snap_file "$LEGACY_HOOK" legacy_hook || return 1
   if [ -d "$LIBTARGET" ]; then touch "$TXN/libtarget.dir_present" || return 1; else touch "$TXN/libtarget.dir_absent" || return 1; fi
@@ -591,6 +617,9 @@ rollback(){
     restore_file "$DIO" dio_manager.json 644 || r=1
     rm -f "$DIO".v33-rgi.[0-9]* "$SI".v33-rgi.[0-9]* 2>/dev/null || r=1
     restore_file "$PF" pf.conf 644 || r=1
+    for n in $(pf_variant_snapshots); do
+      restore_file "$PF_DIR/$n" "pf_variant_$n" "$(cat "$TXN/meta/pf_variant_$n.mode" 2>/dev/null || echo 755)" || r=1
+    done
   fi
   if [ "$APP_RW" = 1 ]; then
     restore_rescue_binaries || r=1
@@ -704,7 +733,8 @@ case "$ALTS_PREVIOUS" in
   *)
     if [ ! -e "$LEGACY_HOOK" ] && [ ! -e "$STAGE" ] && [ ! -e "$PREV" ] &&
        ! grep -Eq '"0x520[0-4]"' "$DIO" 2>/dev/null &&
-       ! grep -Eq 'ALTSCREEN|ALT111' "$PF" 2>/dev/null; then
+       ! grep -Eq 'ALTSCREEN|ALT111' "$PF" 2>/dev/null &&
+       ! grep -Fqx '# BEGIN ALTSCREEN TYPE111 FIREWALL' "$PF_DIR"/pf.*.conf 2>/dev/null; then
       if [ "$RESCUE_RESTORE" = 1 ]; then
         : # Even a clean-looking head unit needs its binary/config rescue applied.
       else
@@ -754,6 +784,15 @@ done < "$NATIVE/manifest.txt"
 [ -f "$BACKUP/firewall-original/pf.conf" ] &&
   same "$BACKUP/firewall-original/pf.conf" "$PF" ||
   fail "pf.conf verification failed"
+VARIANTS="$BACKUP/firewall-variants-original"
+if [ -f "$VARIANTS/COMPLETE" ]; then
+  while IFS= read -r n; do
+    case "$n" in pf.*.conf) ;; *) fail "invalid pf variant backup list" ;; esac
+    [ -f "$VARIANTS/$n" ] && same "$VARIANTS/$n" "$PF_DIR/$n" || fail "pf variant verification failed: $n"
+  done < "$VARIANTS/list"
+fi
+! grep -Fqx '# BEGIN ALTSCREEN TYPE111 FIREWALL' "$PF_DIR"/pf.*.conf 2>/dev/null ||
+  fail "project firewall block remains in a pf variant after restore"
 
 # Exact overlay baseline verification.  The original manifest records whether
 # each stock overlay file existed and which directory owned that baseline.

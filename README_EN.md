@@ -1,10 +1,12 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix5
+# MIB2 Toolbox — CarPlay AltScreen V3.7Fix6
 
 **English** | [简体中文](README.md)
 
 This project is designed for the Audi **MHI2Q** platform and displays the **native CarPlay AltScreen / secondary navigation view** directly on the vehicle's **Virtual Cockpit**. The core display path has been verified in a vehicle. Read this document in full before making changes to the head unit.
 
 **V3.7 update: full RGI navigation-data integration is now available (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)), color conversion for the secondary display now runs on the GPU, cutting whole-system CPU usage from about 80% to about 20%, the runtime watermark has been removed, and starting with V3.7 the whole project is open source under GPL-3.0.**
+
+**V3.7Fix6 update: fixes the missing secondary display on the cluster once the LTE data link is up. The head unit then switches to per-uplink firewall configurations such as `pf.ecm0.conf`, and the installer now writes the 6031 pass rule into those as well.**
 
 **V3.7Fix5 update: the secondary-display data port is fixed at 6031 and written into the head unit's firewall configuration, fixing the black cluster at cold start and cluster dropouts when LTE changes IP; at cold start the secondary display waits until the stock cluster map has loaded; fixes RGI lane guidance disappearing mid-route; the startup video now fills the cluster 1:1; the green menu is trimmed to three entries, and boot logs are saved to the SD card automatically.**
 
@@ -154,7 +156,7 @@ Virtual Cockpit
 - No extra decoder is introduced; the stock decoding path that already works on MHI2Q is reused to keep new variables to a minimum.
 - The FULL / SMALL view areas switch dynamically within the same CarPlay session through the standard `updateViewArea`; the Classic / Sport layout follows the head unit's HMI state.
 - Java/HMI is the only owner of Context80; the display process does not change the cluster Context directly.
-- Secondary-display data uses fixed TCP port 6031: the installer writes a pass rule into the head unit's `pf.conf`, ahead of the carplay0 block rule, so it loads at boot with the stock firewall configuration and no `pfctl` runs while the secondary display is being set up. When the head unit reloads the firewall configuration because LTE changed IP, the rule is loaded again with it. If the rule is not written or the port is taken, the hook falls back to a random port plus a runtime pass rule.
+- Secondary-display data uses fixed TCP port 6031: the installer writes a pass rule, ahead of the carplay0 block rule, into the head unit's `pf.conf` and into the per-uplink `pf.ecm0.conf`, `pf.ppp0.conf`, and `pf.mlan0.conf`, so it loads at boot with the stock firewall configuration and no `pfctl` runs while the secondary display is being set up. When the head unit reloads the firewall configuration because LTE changed IP, or switches to `pf.ecm0.conf` and the like once the LTE data link is up, the rule is loaded again with it. The rule goes into all of these files or into none; if it is not written or the port is taken, the hook falls back to a random port plus a runtime pass rule.
 
 ### Cold start: waiting for the stock cluster map
 
@@ -272,7 +274,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7 Fix5`**) and that the menu has only three entries: `INSTALL NO RGI`, `INSTALL WITH RGI`, and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
+   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7 Fix6`**) and that the menu has only three entries: `INSTALL NO RGI`, `INSTALL WITH RGI`, and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
 
 5. If you still see:
 
@@ -341,7 +343,7 @@ If damaged files prevent normal restore, you can enable rescue mode manually. **
 2. Use the current Toolbox package. Place the **complete matching backup directory** under `MMI-Cockpit-Carplay/backup/` on the SD card, including `original`, `firewall-original`, `universal-hook-original`, other original subdirectories, and checksum files. Do not copy only selected libraries or JSON files.
 3. Create an empty **file** named **`MMI-Cockpit-Carplay/RESCUE_RESTORE`** on the SD card. It is not a directory and has no `.txt` extension. Enable file-extension visibility in Windows and verify that it is not `RESCUE_RESTORE.txt`.
 4. Insert the SD card, keep power stable, disconnect the phone, and select **`RESTORE ORIGINAL`** in the green menu. The screen shows `RESCUE MODE`. A firmware mismatch, unreadable train, incomplete backup, or checksum failure is refused. **Legacy backups without a recorded firmware train cannot be used for rescue; there is no second override marker.**
-5. Rescue permits overwriting differing system binaries and configurations: `dio_manager`, `libairplay.so`, `libNmeBaseClasses.so`, the two CarPlay JSON configurations, and `pf.conf`. A separate transaction snapshot captures this head unit's current state before writes so a failed restore can roll back. That snapshot is not a new clean stock backup and does not replace either original backup. Earlier interrupted transactions are retained under `install-transaction/rescue-preserved.*` or `restore-transaction/rescue-preserved.*`; they are not used as rescue payloads.
+5. Rescue permits overwriting differing system binaries and configurations: `dio_manager`, `libairplay.so`, `libNmeBaseClasses.so`, the two CarPlay JSON configurations, `pf.conf`, and per-uplink firewall configurations such as `pf.ecm0.conf`. A separate transaction snapshot captures this head unit's current state before writes so a failed restore can roll back. That snapshot is not a new clean stock backup and does not replace either original backup. Earlier interrupted transactions are retained under `install-transaction/rescue-preserved.*` or `restore-transaction/rescue-preserved.*`; they are not used as rescue payloads.
 6. Wait for **`RESULT: RESCUE SUCCESS`**, save the logs, delete **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**, and fully reboot the head unit. On failure, follow the result instructions; the marker's presence does not mean rescue succeeded.
 
 The marker applies to the manual `RESTORE ORIGINAL` only. While the marker is present, every later manual restore runs in rescue mode, so always delete it once the rescue is done. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
@@ -397,7 +399,7 @@ Current recommended version:
 
 ~~~text
 main
-└── AUG22 / V3.7Fix5
+└── AUG22 / V3.7Fix6
     ├── China-region (CN) firmware: vehicle-tested and working
     ├── Some European-region (ER) firmware: reported working by users (P5092 / P5152, MU 1329)
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
@@ -406,6 +408,13 @@ main
 The current public release prioritizes stable installation, normal use, and reliable recovery.
 
 ### Changelog
+
+**V3.7Fix6**
+
+- Fixed the secondary display not appearing on the cluster, or cutting out right after it appears, once the LTE data link is up. When the LTE module brings up its data link over ECM, the head unit loads `pf.ecm0.conf` instead of `pf.conf`; PPP dial-up and WLAN client use `pf.ppp0.conf` and `pf.mlan0.conf`. V3.7Fix5 wrote only `pf.conf`, so after the switch the 6031 pass rule was gone and the iPhone's secondary-display data was dropped. The installer now writes the pass rule into these files as well; if any of them cannot take it, none does, and the hook falls back to a random port plus a runtime rule.
+- The original contents of these files are backed up to `MMI-Cockpit-Carplay/backup/firewall-variants-original/` on the SD card and restored byte for byte by `RESTORE ORIGINAL`. On head units installed before V3.7Fix6, restore removes the project's rule block from these files. The install and restore transaction snapshots cover these files too, so a failure partway through rolls them back.
+- Boot logs gain `firewall_sources.txt.log`, which records whether each firewall configuration carries the 6031 rule and which rule set is active.
+- The green menu version label is now `V3.7 Fix6`. The hook, RGI, HMI, and display process are the same as in V3.7Fix5.
 
 **V3.7Fix5**
 

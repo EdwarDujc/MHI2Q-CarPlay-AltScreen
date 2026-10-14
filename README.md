@@ -1,10 +1,12 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix5
+# MIB2 Toolbox — CarPlay AltScreen V3.7Fix6
 
 [English](README_EN.md) | **简体中文**
 
 本项目面向 Audi **MHI2Q** 平台，用于将 **CarPlay 原生 AltScreen / 第二屏导航画面**直接显示至车辆的 **Virtual Cockpit**。核心显示链路已完成实车验证。操作前请完整阅读本说明。
 
 **V3.7 更新：完整 RGI 导航信息联动上线（基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建）；第二屏颜色转换改由 GPU 完成，整机 CPU 占用率从约 80% 降至约 20%；运行水印已移除；V3.7 起全部以 GPL-3.0 开源。**
+
+**V3.7Fix6 更新：修复 LTE 数据连接建立后仪表第二屏无画面。原车此时改用 `pf.ecm0.conf` 等按上网方式区分的防火墙配置，安装时把 6031 放行规则一并写入这些配置。**
 
 **V3.7Fix5 更新：第二屏数据端口固定为 6031 并写入车机防火墙配置，修复冷启动仪表黑屏和 LTE 换 IP 时仪表断流；冷启动时等原车仪表地图加载完成后再显示第二屏；修复 RGI 车道引导中途消失；开屏视频更新为 1:1 铺满仪表；绿色菜单精简为三项，开机日志自动保存到 SD 卡。**
 
@@ -154,7 +156,7 @@ Virtual Cockpit
 - 不引入额外解码器，继续复用 MHI2Q 上已经稳定工作的原车解码流程，减少新变量。
 - FULL / SMALL 两个 viewArea 通过标准 `updateViewArea` 在同一 CarPlay 会话中动态切换；Classic / Sport 布局跟随车机 HMI 状态。
 - Java/HMI 是 Context80 的唯一控制方，显示进程不直接修改仪表 Context。
-- 第二屏数据走固定端口 TCP 6031：安装时在车机 `pf.conf` 的 carplay0 阻断规则之前写入一条放行规则，开机随原车防火墙配置一起加载，建立第二屏时不再临时执行 `pfctl`。原车因 LTE 换 IP 重新加载防火墙配置时，这条规则也会一起加载。规则未写入或端口被占用时，自动退回随机端口加运行时放行规则。
+- 第二屏数据走固定端口 TCP 6031：安装时在车机 `pf.conf` 以及按上网方式区分的 `pf.ecm0.conf`、`pf.ppp0.conf`、`pf.mlan0.conf` 中，于 carplay0 阻断规则之前写入一条放行规则，开机随原车防火墙配置一起加载，建立第二屏时不再临时执行 `pfctl`。原车因 LTE 换 IP 重新加载防火墙配置，或 LTE 数据连接建立后改用 `pf.ecm0.conf` 等配置时，这条规则也会一起加载。这几份配置要么全部写入，要么全部不写；规则未写入或端口被占用时，自动退回随机端口加运行时放行规则。
 
 ### 冷启动：等待原车仪表地图
 
@@ -272,7 +274,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.7 Fix5`**），菜单中只有 `INSTALL NO RGI`、`INSTALL WITH RGI` 和 `RESTORE ORIGINAL` 三项。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
+   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.7 Fix6`**），菜单中只有 `INSTALL NO RGI`、`INSTALL WITH RGI` 和 `RESTORE ORIGINAL` 三项。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
 
 5. 如果此时仍提示：
 
@@ -341,7 +343,7 @@ Script not found:
 2. 使用当前安装包的 Toolbox。在 SD 卡的 `MMI-Cockpit-Carplay/backup/` 下放入匹配的**完整备份目录**，包括 `original`、`firewall-original`、`universal-hook-original` 等原有子目录与校验文件，不要只挑几个 `.so` 或 JSON 文件。
 3. 在 SD 卡创建一个空文件 **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**。这是文件，不是目录，文件名没有 `.txt` 扩展名；Windows 中请先显示文件扩展名，确认没有建成 `RESCUE_RESTORE.txt`。
 4. 插入 SD 卡，保持稳定供电，断开手机，在绿色菜单选择 **`RESTORE ORIGINAL`**。无需增加绿色菜单选项。屏幕会显示 `RESCUE MODE`；固件版本不一致、版本无法读取、备份缺文件或校验失败时都会拒绝。**没有记录固件版本的旧备份不能用于救车，没有第二个标记可以绕过。**
-5. 救车模式允许覆盖内容不同的系统二进制及配置文件，包括 `dio_manager`、`libairplay.so`、`libNmeBaseClasses.so`、两个 CarPlay 配置 JSON 和 `pf.conf`。写回前会保存本车当前状态的独立事务快照，失败时尝试回滚到救车前状态；这份快照不是新的“纯净原车备份”，不会替换借来的或自己的原车备份。此前中断的事务会保留在 `install-transaction/rescue-preserved.*` 或 `restore-transaction/rescue-preserved.*`，不会作为救车写回数据。
+5. 救车模式允许覆盖内容不同的系统二进制及配置文件，包括 `dio_manager`、`libairplay.so`、`libNmeBaseClasses.so`、两个 CarPlay 配置 JSON、`pf.conf` 以及 `pf.ecm0.conf` 等按上网方式区分的防火墙配置。写回前会保存本车当前状态的独立事务快照，失败时尝试回滚到救车前状态；这份快照不是新的“纯净原车备份”，不会替换借来的或自己的原车备份。此前中断的事务会保留在 `install-transaction/rescue-preserved.*` 或 `restore-transaction/rescue-preserved.*`，不会作为救车写回数据。
 6. 等待 **`RESULT: RESCUE SUCCESS`**，保存日志，删除 SD 卡上的 **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**，然后完整重启车机。若失败，按界面提示处理；不要因为留下标记就认为已经复原成功。
 
 这个标记只对手动复原 `RESTORE ORIGINAL` 生效。只要标记还在，之后每次手动复原都会按救车模式执行，所以救车完成后一定要删除它。**INSTALL 的自动卸载始终使用普通严格检查，即使 SD 卡上有救车标记也不会自动覆盖不匹配的文件。** 救车模式只恢复本项目备份覆盖的文件，不能代替完整固件刷写，也不能保证修复其他系统文件损坏。
@@ -397,7 +399,7 @@ GPL-3.0 允许任何人使用、研究、修改和再分发本项目，包括商
 
 ~~~text
 main
-└── AUG22 / V3.7Fix5
+└── AUG22 / V3.7Fix6
     ├── 中国区（CN）固件：实车测试可用
     ├── 欧洲区（ER）部分固件：用户实车反馈可用（P5092 / P5152，MU 1329）
     └── 其他地区固件：可能存在未知 BUG，不保证 100% 可用
@@ -406,6 +408,13 @@ main
 当前公开版本以稳定、可安装、可恢复为优先目标。
 
 ### 更新记录
+
+**V3.7Fix6**
+
+- 修复 LTE 数据连接建立后仪表第二屏无画面，或刚出画面就中断的问题。车机 LTE 模块以 ECM 方式建立数据连接后，原车改为加载 `pf.ecm0.conf`；PPP 拨号和 WLAN 客户端分别对应 `pf.ppp0.conf`、`pf.mlan0.conf`。V3.7Fix5 只写入了 `pf.conf`，切换配置后 6031 放行规则随之失效，iPhone 发来的第二屏数据被丢弃。现在安装时把放行规则一并写入这几份配置；任何一份无法写入时全部不写，退回随机端口加运行时规则。
+- 这几份配置的原始内容备份在 SD 卡 `MMI-Cockpit-Carplay/backup/firewall-variants-original/`，`RESTORE ORIGINAL` 时逐字节还原。V3.7Fix6 之前安装过的车机执行复原时，从这些配置中删除本项目写入的规则段。安装和复原事务的快照也覆盖这几份配置，中途失败时一并回滚。
+- 开机日志新增 `firewall_sources.txt.log`，记录各防火墙配置是否包含 6031 规则，以及当前生效的是哪一套规则。
+- 绿色菜单版本标识更新为 `V3.7 Fix6`。hook、RGI、HMI 与显示进程与 V3.7Fix5 相同。
 
 **V3.7Fix5**
 

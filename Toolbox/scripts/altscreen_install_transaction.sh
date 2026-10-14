@@ -59,6 +59,7 @@ JAR="$(p /mnt/app/eso/hmi/lsd/jars/carplay_hook.jar)"
 SI="$(p /mnt/system/etc/eso/production/smartphone_integrator.json)"
 DIO="$(p /mnt/system/etc/eso/production/dio_manager.json)"
 PF="$(p /mnt/system/etc/pf.conf)"
+PF_DIR="$(p /mnt/system/etc)"
 UNIVERSAL_REL="/mnt/app/root/carplay-altscreen/lib/libcarplay_altscreen.so"
 UNIVERSAL_DST="$(p "$UNIVERSAL_REL")"
 CHAIN_LOCK="$STATE/.chain_test.lock"
@@ -195,6 +196,23 @@ verify_file_snapshot(){
   fi
 }
 
+# Per-uplink pf rule sets (pf.ecm0.conf, pf.ppp0.conf, pf.mlan0.conf) that the
+# controller patches beside pf.conf. A transaction without the list predates
+# them and never touched these files.
+snap_pf_variants(){
+  : > "$TXN/pf_variants.list" || return 1
+  for f in "$PF_DIR"/pf.*.conf; do
+    [ -f "$f" ] || continue
+    n=${f##*/}
+    case "$n" in *[!A-Za-z0-9._-]*) continue ;; esac
+    snap_file "$f" "pf_variant_$n" || return 1
+    if [ -x "$f" ]; then echo 755; else echo 644; fi > "$TXN/meta/pf_variant_$n.mode" || return 1
+    echo "$n" >> "$TXN/pf_variants.list" || return 1
+  done
+}
+pf_variant_snapshots(){
+  [ ! -f "$TXN/pf_variants.list" ] || cat "$TXN/pf_variants.list"
+}
 snap_dir(){
   src=$1; name=$2; dst="$TXN/dirs/$name"
   if [ -d "$src" ]; then
@@ -296,6 +314,10 @@ validate_snapshot(){
   for n in startup.sh smartphone_integrator.json dio_manager.json pf.conf carplay_hook.jar legacy_hook; do
     validate_file_snapshot "$n" || { log "SNAPSHOT_INTEGRITY=FAIL kind=file name=$n"; return 1; }
   done
+  for n in $(pf_variant_snapshots); do
+    case "$n" in pf.*.conf) ;; *) log "SNAPSHOT_INTEGRITY=FAIL kind=pf_variant_name"; return 1 ;; esac
+    validate_file_snapshot "pf_variant_$n" || { log "SNAPSHOT_INTEGRITY=FAIL kind=file name=pf_variant_$n"; return 1; }
+  done
   for n in runtime runtime_stage runtime_previous libtarget sd_state sd_backup sd_staging; do
     validate_dir_snapshot "$n" || { log "SNAPSHOT_INTEGRITY=FAIL kind=dir name=$n"; return 1; }
   done
@@ -354,6 +376,7 @@ snapshot(){
   snap_file "$SI" smartphone_integrator.json || return 1
   snap_file "$DIO" dio_manager.json || return 1
   snap_file "$PF" pf.conf || return 1
+  snap_pf_variants || return 1
   snap_file "$JAR" carplay_hook.jar || return 1
   snap_file "$LEGACY_HOOK" legacy_hook || return 1
 
@@ -386,6 +409,9 @@ verify_preinstall(){
   verify_file_snapshot "$SI" smartphone_integrator.json || return 1
   verify_file_snapshot "$DIO" dio_manager.json || return 1
   verify_file_snapshot "$PF" pf.conf || return 1
+  for n in $(pf_variant_snapshots); do
+    verify_file_snapshot "$PF_DIR/$n" "pf_variant_$n" || return 1
+  done
   verify_file_snapshot "$JAR" carplay_hook.jar || return 1
   verify_file_snapshot "$LEGACY_HOOK" legacy_hook || return 1
   verify_dir_snapshot "$RUNTIME" runtime || return 1
@@ -429,6 +455,9 @@ rollback(){
     restore_file "$DIO" dio_manager.json 644 || r=1
     rm -f "$DIO".v33-rgi.[0-9]* "$SI".v33-rgi.[0-9]* 2>/dev/null || r=1
     restore_file "$PF" pf.conf 644 || r=1
+    for n in $(pf_variant_snapshots); do
+      restore_file "$PF_DIR/$n" "pf_variant_$n" "$(cat "$TXN/meta/pf_variant_$n.mode" 2>/dev/null || echo 755)" || r=1
+    done
   fi
 
   if [ "$APP_RW" = 1 ]; then
@@ -497,6 +526,16 @@ verify_boot_backup(){
   esac
 }
 
+# The type-111 rule sits ahead of the carplay0 terminal block, or the file has
+# no such block and filters nothing.
+static_rule_open(){
+  awk -v rule="pass in quick on carplay0 proto tcp from any to any port = 6031 allow-opts" '
+    {key=$0; sub(/\r$/,"",key)}
+    key==rule {found=1; exit}
+    key ~ /^[ \t]*block[ \t]+((drop|return)[ \t]+)?in[ \t]+(quick[ \t]+)?on[ \t]+carplay0[ \t]+all[ \t]*$/ {blocked=1; exit}
+    END{exit (found || !blocked) ? 0 : 1}
+  ' "$1"
+}
 verify_installed(){
   [ -s "$JAR_SOURCE" ] && [ -s "$UNIVERSAL_SOURCE" ] ||
     { log "INSTALL_VERIFY=FAIL reason=PACKAGE_ARTIFACT_MISSING"; return 1; }
@@ -582,16 +621,19 @@ verify_installed(){
   # (a pf.conf without that block filters nothing and needs no rule). The
   # controller skips it when pfctl rejects the line; the hook then keeps its
   # ephemeral port and runtime rule, so this is not an install failure.
+  # With the LTE data link up a per-uplink variant replaces pf.conf, and the
+  # hook only checks pf.conf, so a variant without the rule drops the stream.
   firewall=static_fixed_port_6031
-  awk -v rule="pass in quick on carplay0 proto tcp from any to any port = 6031 allow-opts" '
-    {key=$0; sub(/\r$/,"",key)}
-    key==rule {found=1; exit}
-    key ~ /^[ \t]*block[ \t]+((drop|return)[ \t]+)?in[ \t]+(quick[ \t]+)?on[ \t]+carplay0[ \t]+all[ \t]*$/ {blocked=1; exit}
-    END{exit (found || !blocked) ? 0 : 1}
-  ' "$PF" || {
+  if static_rule_open "$PF"; then
+    for f in "$PF_DIR"/pf.*.conf; do
+      [ -f "$f" ] || continue
+      static_rule_open "$f" ||
+        { log "INSTALL_VERIFY=FAIL reason=STATIC_FIREWALL_VARIANT_MISSING file=${f##*/} port=6031"; return 1; }
+    done
+  else
     firewall=runtime_fallback
     log "INSTALL_VERIFY_WARN reason=STATIC_FIREWALL_RULE_ABSENT port=6031 runtime_fallback=EPHEMERAL_EXACT_PORT"
-  }
+  fi
   log "INSTALL_VERIFY=PASS runtime=owned jar=project_owned_verified native_preload=verified diagnostics=verified sd_state=verified recovery_set=verified firewall=$firewall"
   return 0
 }

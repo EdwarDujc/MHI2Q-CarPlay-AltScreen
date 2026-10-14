@@ -223,6 +223,71 @@ flat_probe() {
     flat_plain_append "$flat_out" "$FLAT_DEST/$flat_name.log" 2>/dev/null || true
     rm -f "$flat_raw" "$flat_out"
 }
+# Which file pf runs depends on the uplink: with the LTE ECM data link up the
+# stock network service loads /etc/pf.ecm0.conf (pf.ppp0.conf, pf.mlan0.conf)
+# in place of /etc/pf.conf. Record every pf configuration, whether it carries
+# the fixed type-111 rule, every script that runs pfctl, and which live
+# ruleset was active.
+# Bounded: 4 captures per boot, files up to 256 KiB, 40 files per capture.
+flat_firewall_sources() {
+    [ ! -f "${FLAT_PREFIX}_probe.stop" ] || return 0
+    fw_count_file="${FLAT_PREFIX}_fwsrc.count"
+    fw_count=0
+    [ ! -f "$fw_count_file" ] || fw_count=$(cat "$fw_count_file" 2>/dev/null || echo 0)
+    case "$fw_count" in 0|1|2|3) ;; *) return 0 ;; esac
+    fw_count=$((fw_count + 1))
+    echo "$fw_count" > "$fw_count_file"
+    fw_out="${FLAT_PREFIX}_fwsrc.out"
+    {
+        printf '%s FIREWALL_SOURCES_BEGIN capture=%s\n' "$(date +%Y%m%d_%H%M%S)" "$fw_count"
+        fw_live=UNKNOWN
+        if [ -f "$FLAT_DEST/pf_rules.txt.log" ]; then
+            fw_tail=$(tail -c 32768 "$FLAT_DEST/pf_rules.txt.log" 2>/dev/null)
+            case "$fw_tail" in
+                *" on ecm1 "*) fw_live=ECM ;;
+                *" on ppp0 "*) fw_live=PPP ;;
+                *) fw_live=OTHER ;;
+            esac
+            case "$fw_tail" in *"port = 6031"*) fw_6031=LIVE ;; *) fw_6031=ABSENT ;; esac
+            printf 'FIREWALL_LIVE_RULESET kind=%s type111_6031=%s\n' "$fw_live" "$fw_6031"
+        fi
+        for fw_dir in "$ROOT/etc" "$ROOT/etc/scripts" "$ROOT/mnt/system/etc" "$ROOT/mnt/system/etc/scripts" "$ROOT/tmp" "$ROOT/var" "$ROOT/proc/boot"; do
+            [ -d "$fw_dir" ] || continue
+            printf 'FIREWALL_DIR %s\n' "$fw_dir"
+            ls -la "$fw_dir" 2>&1 | grep -i -E 'pf|huawei|nad|ecm|dhcp|ppp|lte|network|firewall|wan' || true
+        done
+        fw_files=0
+        for fw_file in "$ROOT"/etc/* "$ROOT"/etc/scripts/* "$ROOT"/mnt/system/etc/* "$ROOT"/mnt/system/etc/scripts/* "$ROOT"/tmp/*pf* "$ROOT"/var/*pf*; do
+            [ -f "$fw_file" ] || continue
+            [ "$fw_files" -lt 40 ] || { printf 'FIREWALL_FILES_TRUNCATED limit=40\n'; break; }
+            fw_size=$(wc -c < "$fw_file" 2>/dev/null) || continue
+            fw_size=$((fw_size + 0))
+            [ "$fw_size" -gt 0 ] && [ "$fw_size" -le 262144 ] || continue
+            case "${fw_file##*/}" in
+                *pf*) ;;
+                *) grep -q -e carplay0 -e pfctl "$fw_file" 2>/dev/null || continue ;;
+            esac
+            fw_files=$((fw_files + 1))
+            fw_sum=$(cksum < "$fw_file" 2>/dev/null | awk '{print $1}')
+            case "${fw_file##*/}" in
+                pf*.conf)
+                    if grep -q 'port = 6031' "$fw_file" 2>/dev/null; then fw_rule=PRESENT; else fw_rule=ABSENT; fi
+                    printf 'FIREWALL_TYPE111_FILE path=%s rule6031=%s\n' "$fw_file" "$fw_rule" ;;
+            esac
+            # Bodies once per boot; later captures only show whether they changed.
+            if [ "$fw_count" = 1 ]; then
+                printf 'FILE_BEGIN path=%s size=%s cksum=%s\n' "$fw_file" "$fw_size" "$fw_sum"
+                cat "$fw_file" 2>&1
+                printf '\nFILE_END path=%s\n' "$fw_file"
+            else
+                printf 'FILE path=%s size=%s cksum=%s\n' "$fw_file" "$fw_size" "$fw_sum"
+            fi
+        done
+        printf '%s FIREWALL_SOURCES_END capture=%s files=%s live=%s\n' "$(date +%Y%m%d_%H%M%S)" "$fw_count" "$fw_files" "$fw_live"
+    } > "$fw_out" 2>&1
+    flat_plain_append "$fw_out" "$FLAT_DEST/firewall_sources.txt.log" 2>/dev/null || true
+    rm -f "$fw_out"
+}
 flat_audio_capture() (
     # Preserve a partial line between polls so an error split across writes is
     # still indexed. This is an index of existing stock messages, no PCM dump.
@@ -474,6 +539,7 @@ run_flat_plaintext() {
             else
                 flat_probe pf_rules.txt pfctl -sr
             fi
+            flat_firewall_sources
             flat_state="${FLAT_PREFIX}_state.out"
             {
                 date
