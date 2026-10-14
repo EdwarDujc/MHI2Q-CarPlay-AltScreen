@@ -64,21 +64,16 @@
 # Exact SD runtime closure. Some installer/diagnostic filenames contain "test";
 # those are vehicle runtime scripts and must not be removed by a blanket test rule.
 !/Toolbox/carplay_alt_screen/hmi/BUILD_INFO.txt
-!/Toolbox/carplay_alt_screen/hmi/carplay_hook-basevideo3.jar
 !/Toolbox/carplay_alt_screen/mirror_display/release/BUILD_INFO.txt
 !/Toolbox/carplay_alt_screen/mirror_display/release/LICENSE.MMI-MIRROR
 !/Toolbox/carplay_alt_screen/mirror_display/release/SHA256SUMS
-!/Toolbox/carplay_alt_screen/mirror_display/release/carplay-alt111-mirror-display
 !/Toolbox/carplay_alt_screen/mirror_display/release/rgi_supervisor.sh
 !/Toolbox/carplay_alt_screen/mirror_display/release/start_vehicle.sh
 !/Toolbox/carplay_alt_screen/mirror_display/release/stop_vehicle.sh
 !/Toolbox/carplay_alt_screen/mirror_display/release/stream_supervisor.sh
-!/Toolbox/carplay_alt_screen/rgi_meta/libcarplay_rgi_meta.so
 !/Toolbox/carplay_alt_screen/rgi_renderer/release/BUILD_INFO.txt
 !/Toolbox/carplay_alt_screen/rgi_renderer/release/SHA256SUMS
 !/Toolbox/carplay_alt_screen/rgi_renderer/release/flag_atlas.rgba
-!/Toolbox/carplay_alt_screen/rgi_renderer/release/maneuver_render
-!/Toolbox/carplay_alt_screen/universal/libcarplay_altscreen.so
 !/Toolbox/scripts/altscreen_adaptive_diag.sh
 !/Toolbox/scripts/altscreen_console.sh
 !/Toolbox/scripts/altscreen_install.sh
