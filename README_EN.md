@@ -1,4 +1,4 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix4
+# MIB2 Toolbox — CarPlay AltScreen V3.7Fix5
 
 **English** | [简体中文](README.md)
 
@@ -6,7 +6,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 **V3.7 update: full RGI navigation-data integration is now available (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)), color conversion for the secondary display now runs on the GPU, cutting whole-system CPU usage from about 80% to about 20%, the runtime watermark has been removed, and starting with V3.7 the whole project is open source under GPL-3.0.**
 
-**V3.7Fix4 update: fixes the map offset in the Q7 Sport cluster small view; more robust fast reconnect, disconnect cleanup, and stream recovery, with automatic RGI recovery after failures; the stock backup is now bound to the firmware version so a backup from other firmware cannot be applied by mistake; adds a manual [rescue restore mode](#71-rescue-restore-with-a-backup-from-the-same-model-and-firmware).**
+**V3.7Fix5 update: the secondary-display data port is fixed at 6031 and written into the head unit's firewall configuration, fixing the black cluster at cold start and cluster dropouts when LTE changes IP; at cold start the secondary display waits until the stock cluster map has loaded; fixes RGI lane guidance disappearing mid-route; the startup video now fills the cluster 1:1; the green menu is trimmed to three entries, and boot logs are saved to the SD card automatically.**
 
 > [!NOTE]
 > **Sister project: MMI Mirror**  
@@ -60,11 +60,12 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 - Left steering-wheel scroll-wheel zoom
 - Cluster map shows the speed-limit sign and compass, without an ETA overlay
 - GPU color conversion: whole-system CPU usage cut from about 80% to about 20%
-- STATUS diagnostics
+- At cold start, the secondary display waits for the stock cluster map to be ready
+- Fixed-port firewall rule for the secondary display; no dropouts when LTE changes IP
 - Safe installation and recovery
 - Protection against interrupted installation / recovery
 - Restoration of stock configuration
-- Logs and SD-card backups
+- Boot logs saved to the SD card automatically; stock backups kept on the SD card
 
 ## Compatibility
 
@@ -153,6 +154,13 @@ Virtual Cockpit
 - No extra decoder is introduced; the stock decoding path that already works on MHI2Q is reused to keep new variables to a minimum.
 - The FULL / SMALL view areas switch dynamically within the same CarPlay session through the standard `updateViewArea`; the Classic / Sport layout follows the head unit's HMI state.
 - Java/HMI is the only owner of Context80; the display process does not change the cluster Context directly.
+- Secondary-display data uses fixed TCP port 6031: the installer writes a pass rule into the head unit's `pf.conf`, ahead of the carplay0 block rule, so it loads at boot with the stock firewall configuration and no `pfctl` runs while the secondary display is being set up. When the head unit reloads the firewall configuration because LTE changed IP, the rule is loaded again with it. If the rule is not written or the port is taken, the hook falls back to a random port plus a runtime pass rule.
+
+### Cold start: waiting for the stock cluster map
+
+At cold start, the Java HMI checks every 500 ms, on the stock navigation thread, whether the cluster map (MapKombi) has been initialized. Once it has, it notifies `libcarplay_rgi_meta.so` over the local bus (TCP 19810, command `0x0119`), which hands the notice to `libcarplay_altscreen.so`. Until then the hook does not ask the iPhone for the secondary-display picture (`showUI` / `forceKeyFrame`), does not switch view areas, and the display process does not start, so both the startup video and the secondary display appear only after the stock map is ready. The main CarPlay display, the secondary-display capability exchange, and the iPhone setting up the secondary video stream are not delayed.
+
+This waits for the stock cluster map object to finish initializing, not for a GPS fix or an active route. Readiness is kept in memory only; hiding the stock map later does not close the gate again. There is no timeout: if the stock cluster map never comes up, the secondary display keeps waiting.
 
 ### Performance: GPU color conversion
 
@@ -162,7 +170,7 @@ In vehicle testing, **whole-system CPU usage dropped from about 80% to about 20%
 
 ### RGI navigation-data path
 
-- `libcarplay_rgi_meta.so` receives iAP2 RouteGuidance data inside the stock CarPlay process and passes it to the Java HMI over local TCP port 19810.
+- `libcarplay_rgi_meta.so` receives iAP2 RouteGuidance data inside the stock CarPlay process and passes it to the Java HMI over local TCP port 19810. Both install modes load it and start this local bus: `INSTALL NO RGI` only turns off the navigation-data module, while notices such as stock-map readiness still travel over the bus.
 - Maneuver arrows and lane guidance are sent over local TCP port 19800 to the separate `maneuver_render` process, which draws them on displayable 98. The process is supervised by `rgi_supervisor.sh` and restarted a limited number of times if it exits unexpectedly.
 
 ### Steering-wheel zoom
@@ -179,9 +187,9 @@ Starting with V3.7, all source code is in this repository:
 |---|---|---|
 | `Toolbox/carplay_alt_screen/src/` | Preload hook for the stock CarPlay process: private111 secondary display, frame readback, viewArea, wheel zoom | `universal/libcarplay_altscreen.so` |
 | `Toolbox/carplay_alt_screen/mirror_display/` | Secondary-display process (C++ / GLES / displayable3) with GPU color conversion and the embedded startup logo | `mirror_display/release/carplay-alt111-mirror-display` |
-| `Toolbox/carplay_alt_screen/rgi_native/` | RGI preload hook: iAP2 RouteGuidance parsing and forwarding | `rgi_meta/libcarplay_rgi_meta.so` |
+| `Toolbox/carplay_alt_screen/rgi_native/` | RGI preload hook: iAP2 RouteGuidance parsing and forwarding, stock-map readiness forwarding | `rgi_meta/libcarplay_rgi_meta.so` |
 | `Toolbox/carplay_alt_screen/rgi_renderer/` | Maneuver-arrow / lane-guidance renderer | `rgi_renderer/release/maneuver_render` |
-| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook: Context80, cluster layers, RGI distribution, wheel events; `stubs/` holds compile-only stock API stubs and `vendor/` the baseline JAR | `hmi/carplay_hook-basevideo3.jar` |
+| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook: Context80, cluster layers, RGI distribution, wheel events, stock-map startup wait; `stubs/` holds compile-only stock API stubs and `vendor/` the baseline JAR | `hmi/carplay_hook-basevideo3.jar` |
 | `Toolbox/scripts/`, `Toolbox/GEM/` | Install / start / status / restore / diagnostic scripts and the green menu | Used from the SD card |
 | `Tools/`, `BUILD-*.sh` | Build and verification tools | — |
 
@@ -264,7 +272,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7Fix4`**). If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
+   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7 Fix5`**) and that the menu has only three entries: `INSTALL NO RGI`, `INSTALL WITH RGI`, and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
 
 5. If you still see:
 
@@ -293,33 +301,33 @@ Installing and enabling are now one step, so **only one reboot is needed**:
    [5/5] Verifying installation...
    ```
 
-4. After `RESULT: SUCCESS`, **fully reboot the head unit once**, then connect the iPhone, enter CarPlay, start navigation, and check that the Virtual Cockpit shows the secondary display and updates with navigation.
+4. After `RESULT: SUCCESS`, **fully reboot the head unit once**, then connect the iPhone, enter CarPlay, start navigation, and check that the Virtual Cockpit shows the secondary display and updates with navigation. At cold start the secondary display appears only after the stock cluster map has loaded; this is expected.
 5. If it shows `RESULT: FAILED`, the lines below it say which step failed, what state the head unit is in now (unchanged / rolled back / restored to stock), and what to do next. The full run is in the SD-card log shown after `Log:`.
 
-`STATUS` shows the current mode as `INSTALL_RGI_MODE=WITH / NO`. To switch modes, simply run INSTALL again with the other mode; the installer removes the current version first.
+The install mode is recorded as `INSTALL_RGI_MODE=WITH / NO` in the install log on the SD card (`MMI-Cockpit-Carplay/logs/operations/install_*.log`). To switch modes, simply run INSTALL again with the other mode; the installer removes the current version first.
 
 > [!NOTE]
-> Packages published on GitHub Releases show a startup watermark when the secondary display starts. This is expected. It is not the vehicle boot logo.
+> When the secondary display starts, it first plays a startup video of about 5 seconds (filling the cluster) and then switches to the CarPlay picture. This is expected. It is not the vehicle boot logo.
 
-### 5. Check status and troubleshoot
+### 5. Troubleshooting
 
-- With CarPlay navigation running, open `STATUS`. `PHYSICAL_ROUTE_READY=SOFTWARE_CHAIN_COMPLETE` means the script observed the video decoding, display path, Context 80, and other required software conditions; you must still **visually confirm the image on the Virtual Cockpit**. `PHYSICAL_ROUTE_READY=NO` means the required conditions are not all present; check the missing items shown in the output.
+- Judge success by the **image actually shown on the Virtual Cockpit**.
 - If the `MMI-Cockpit-Carplay` menu is missing, first confirm that the upstream green menu works, the SD-card directory layout is correct, and `MQBCoding → Update Toolbox` completed successfully.
 - If `Update Toolbox` itself reports `Script not found`, that is an upstream Toolbox base-installation problem rather than an AltScreen installer problem. Repair the upstream Toolbox through the red software-update menu first.
+- If the cluster never shows the secondary display after a cold start, first check that the stock navigation map shows normally on the cluster. This project waits for the stock cluster map to initialize before asking for the secondary display, so if the stock map does not come up, the secondary display will not appear either. In the boot log `hook_tmp.log`, `PHASE=OEM_MAP_READY` means the wait is over; only `PHASE=ALT111_REQUEST_DEFERRED ... reason=oem_map_not_initialized` means it is still waiting for the stock map.
 - If Baidu Maps does not appear on the cluster or Amap (Gaode) shows the wrong aspect ratio, first make sure the iPhone runs iOS 18 or later (iOS 26 recommended).
-- If the SD card is not detected, check FAT32, root layout, and read/write status. If `STATUS` is not ready, confirm that CarPlay is connected and navigation is producing video, then record the status and logs; do not reinstall repeatedly.
-- `STORE LOGS + RESTORE` tries to collect diagnostics and **then immediately restores the stock configuration**. It is not a logs-only action. If you want to keep the AltScreen runtime installed and active, do not select it.
+- If the SD card is not detected, check FAT32, root layout, and read/write status. If the secondary display shows no picture, confirm that CarPlay is connected and navigation is producing video, then save the logs and report it; do not reinstall repeatedly.
 
 ### 6. Logs
 
-- Runtime logs are kept on the head unit in `/tmp/MMI-Cockpit-Carplay/`. They cover private111 connect / teardown, H.264, Screen readback, decoded SHM, display frame rate, displayable3, Context80, view-area and layout state, and system diagnostics such as CPU, temperature, and memory.
-- The RGI renderer logs to `/tmp/maneuver_render.log`.
-- After `STORE LOGS + RESTORE`, logs are saved to the `MMI-Cockpit-Carplay/logs/` directory on the SD card.
-- When something goes wrong, save the complete logs before changing any configuration or code. When reporting an issue, attach the logs and include the firmware version and region, the Classic / Sport and FULL / SMALL layout, and how the phone was connected (phone plugged in before the head unit started / after it fully started / quick reconnect).
+- After installation, each boot's runtime logs are saved automatically to `MMI-Cockpit-Carplay/logs/boots/boot_*/` on the SD card (the card must be inserted at boot). They cover private111 connect / teardown, H.264, Screen readback, decoded SHM, display frame rate, displayable3, Context80, view-area and layout state, firewall rules and network state, and the stock system log.
+- Logs from install, restore, and other operations are saved to `MMI-Cockpit-Carplay/logs/operations/` on the SD card.
+- Live logs on the head unit are under `/tmp/`, for example `/tmp/altscreen_hook.log` and the RGI renderer's `/tmp/maneuver_render.log`.
+- When something goes wrong, save the complete logs before changing any configuration or code. When reporting an issue, attach the whole `MMI-Cockpit-Carplay/logs/` directory from the SD card and include the firmware version and region, the Classic / Sport and FULL / SMALL layout, and how the phone was connected (phone plugged in before the head unit started / after it fully started / quick reconnect).
 
 ### 7. Restore the stock configuration
 
-1. Insert the SD card that retains the `MMI-Cockpit-Carplay` stock-backup directory. Select `RESTORE ORIGINAL`, or `STORE LOGS + RESTORE` if you want to collect logs before restoring.
+1. Insert the SD card that retains the `MMI-Cockpit-Carplay` stock-backup directory and select `RESTORE ORIGINAL`. Logs from earlier boots are already on the SD card, so there is no need to export them before restoring.
 2. Wait for the final `RESULT:` line. `RESULT: SUCCESS` means the stock configuration is back; then fully reboot the head unit. Restore stops the display process, releases the Context80 display demand, removes the startup entries, removes this project's HMI JAR, and restores the HMI files and preload configuration saved before installation.
 3. If it shows `RESULT: FAILED`, follow the lines below it; if they say the rollback was incomplete, **do not reboot** and run `RESTORE ORIGINAL` again. A head unit that is already stock shows `RESULT: NOTHING TO RESTORE`.
 
@@ -336,7 +344,7 @@ If damaged files prevent normal restore, you can enable rescue mode manually. **
 5. Rescue permits overwriting differing system binaries and configurations: `dio_manager`, `libairplay.so`, `libNmeBaseClasses.so`, the two CarPlay JSON configurations, and `pf.conf`. A separate transaction snapshot captures this head unit's current state before writes so a failed restore can roll back. That snapshot is not a new clean stock backup and does not replace either original backup. Earlier interrupted transactions are retained under `install-transaction/rescue-preserved.*` or `restore-transaction/rescue-preserved.*`; they are not used as rescue payloads.
 6. Wait for **`RESULT: RESCUE SUCCESS`**, save the logs, delete **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**, and fully reboot the head unit. On failure, follow the result instructions; the marker's presence does not mean rescue succeeded.
 
-The marker applies to manual restore only, meaning `RESTORE ORIGINAL` and `STORE LOGS + RESTORE`. While the marker is present, every later manual restore runs in rescue mode, so always delete it once the rescue is done. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
+The marker applies to the manual `RESTORE ORIGINAL` only. While the marker is present, every later manual restore runs in rescue mode, so always delete it once the rescue is done. **INSTALL's automatic uninstall always retains normal strict checks, even with this marker present.** Rescue restores only files covered by this project's backup; it does not replace a full firmware reflash or guarantee repair of other damaged system files.
 
 ### 8. Upgrade from an older version
 
@@ -389,7 +397,7 @@ Current recommended version:
 
 ~~~text
 main
-└── AUG22 / V3.7Fix4
+└── AUG22 / V3.7Fix5
     ├── China-region (CN) firmware: vehicle-tested and working
     ├── Some European-region (ER) firmware: reported working by users (P5092 / P5152, MU 1329)
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
@@ -398,6 +406,15 @@ main
 The current public release prioritizes stable installation, normal use, and reliable recovery.
 
 ### Changelog
+
+**V3.7Fix5**
+
+- The secondary-display data port is fixed at TCP 6031: the installer writes a pass rule into the head unit's firewall configuration `pf.conf`, which loads at boot with the stock configuration, and no `pfctl` runs while the secondary display is being set up. Fixes the black cluster at cold start caused by `pfctl` timeouts, and cluster dropouts when the head unit reloads its firewall configuration after LTE changes IP and the runtime pass rule is lost. Before writing, `pfctl` checks the result: if the original configuration parses but the one with the rule does not, the rule is not written and the hook falls back to a random port plus a runtime rule; the install does not fail.
+- At cold start, the secondary display waits until the stock cluster map (MapKombi) has initialized before asking the iPhone for the picture and starting the cluster display; the main CarPlay display and the secondary-display negotiation are not delayed.
+- `INSTALL NO RGI` now also starts the local bus between the HMI and the hook, which carries the stock-map readiness notice.
+- Fixed RGI lane guidance showing only at the start of navigation and then disappearing: lane data uses its own IDs and the cache is no longer pruned by maneuver index.
+- New startup video that fills the 1440×455 cluster plane pixel for pixel instead of being scaled and centered.
+- The green menu is trimmed to `INSTALL NO RGI`, `INSTALL WITH RGI`, and `RESTORE ORIGINAL`; `STATUS` and `STORE LOGS + RESTORE` were removed, and after installation each boot's logs are saved to the SD card automatically. The version label is now `V3.7 Fix5`.
 
 **V3.7Fix4**
 

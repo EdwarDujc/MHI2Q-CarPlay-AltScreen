@@ -1,4 +1,4 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix4
+# MIB2 Toolbox — CarPlay AltScreen V3.7Fix5
 
 [English](README_EN.md) | **简体中文**
 
@@ -6,7 +6,7 @@
 
 **V3.7 更新：完整 RGI 导航信息联动上线（基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建）；第二屏颜色转换改由 GPU 完成，整机 CPU 占用率从约 80% 降至约 20%；运行水印已移除；V3.7 起全部以 GPL-3.0 开源。**
 
-**V3.7Fix4 更新：修复 Q7 运动仪表小视图地图偏移；加强快速重连、断开清理和断流恢复的稳定性，RGI 异常后可自动恢复；原车备份与固件版本绑定，防止误用其他固件的备份；新增手动[救车复原模式](#71-救车模式用同型号同固件的备份复原)。**
+**V3.7Fix5 更新：第二屏数据端口固定为 6031 并写入车机防火墙配置，修复冷启动仪表黑屏和 LTE 换 IP 时仪表断流；冷启动时等原车仪表地图加载完成后再显示第二屏；修复 RGI 车道引导中途消失；开屏视频更新为 1:1 铺满仪表；绿色菜单精简为三项，开机日志自动保存到 SD 卡。**
 
 > [!NOTE]
 > **姊妹项目：MMI Mirror**  
@@ -60,11 +60,12 @@
 - 方向盘左侧滚轮缩放
 - 仪表地图显示限速牌和指南针，不叠加 ETA
 - GPU 颜色转换：整机 CPU 占用率从约 80% 降至约 20%
-- STATUS 状态诊断
+- 冷启动等待原车仪表地图就绪后再显示第二屏
+- 第二屏固定端口防火墙放行，LTE 换 IP 不断流
 - 安全安装与恢复
 - 安装 / 恢复中断保护
 - 原车配置恢复
-- 日志与 SD 卡备份
+- 开机日志自动保存到 SD 卡，原车备份保存在 SD 卡
 
 ## 适用范围
 
@@ -153,6 +154,13 @@ Virtual Cockpit
 - 不引入额外解码器，继续复用 MHI2Q 上已经稳定工作的原车解码流程，减少新变量。
 - FULL / SMALL 两个 viewArea 通过标准 `updateViewArea` 在同一 CarPlay 会话中动态切换；Classic / Sport 布局跟随车机 HMI 状态。
 - Java/HMI 是 Context80 的唯一控制方，显示进程不直接修改仪表 Context。
+- 第二屏数据走固定端口 TCP 6031：安装时在车机 `pf.conf` 的 carplay0 阻断规则之前写入一条放行规则，开机随原车防火墙配置一起加载，建立第二屏时不再临时执行 `pfctl`。原车因 LTE 换 IP 重新加载防火墙配置时，这条规则也会一起加载。规则未写入或端口被占用时，自动退回随机端口加运行时放行规则。
+
+### 冷启动：等待原车仪表地图
+
+冷启动时，Java HMI 每 500 ms 在原车导航线程上检查一次仪表地图（MapKombi）是否已初始化。初始化完成后，通过本机总线（TCP 19810，命令 `0x0119`）通知 `libcarplay_rgi_meta.so`，再转交给 `libcarplay_altscreen.so`。收到通知之前，hook 不会向 iPhone 请求第二屏画面（`showUI` / `forceKeyFrame`）、不切换 viewArea，显示进程也不会启动，所以开屏视频和第二屏画面都要等原车地图就绪后才出现。CarPlay 主屏、第二屏能力声明和 iPhone 建立第二屏视频流不受影响。
+
+这里等待的是原车仪表地图对象初始化完成，不是 GPS 定位，也不是开始导航。就绪状态只在内存中记录，之后原车地图隐藏也不会重新关闭。这一步没有超时：原车仪表地图没有起来时，第二屏一直等待。
 
 ### 性能优化：GPU 颜色转换
 
@@ -162,7 +170,7 @@ Virtual Cockpit
 
 ### RGI 导航信息链路
 
-- `libcarplay_rgi_meta.so` 在原车 CarPlay 进程中接收 iAP2 RouteGuidance 导航信息，通过本机 TCP 19810 交给 Java HMI。
+- `libcarplay_rgi_meta.so` 在原车 CarPlay 进程中接收 iAP2 RouteGuidance 导航信息，通过本机 TCP 19810 交给 Java HMI。两种安装模式都会加载它并启动这条本机总线：`INSTALL NO RGI` 只关闭导航信息模块，原车地图就绪通知等仍经由这条总线传递。
 - 转向箭头和车道引导通过本机 TCP 19800 发给独立的 `maneuver_render` 进程，由它绘制到 displayable 98；该进程由 `rgi_supervisor.sh` 守护，异常退出后有限次自动重启。
 
 ### 方向盘滚轮缩放
@@ -179,9 +187,9 @@ V3.7 起全部源码都在本仓库中：
 |---|---|---|
 | `Toolbox/carplay_alt_screen/src/` | 原车 CarPlay 进程的预加载 hook：private111 第二屏接入、画面读取、viewArea、滚轮缩放 | `universal/libcarplay_altscreen.so` |
 | `Toolbox/carplay_alt_screen/mirror_display/` | 第二屏显示进程（C++ / GLES / displayable3），GPU 完成颜色转换，内嵌开屏 Logo | `mirror_display/release/carplay-alt111-mirror-display` |
-| `Toolbox/carplay_alt_screen/rgi_native/` | RGI 预加载 hook：iAP2 RouteGuidance 解析与转发 | `rgi_meta/libcarplay_rgi_meta.so` |
+| `Toolbox/carplay_alt_screen/rgi_native/` | RGI 预加载 hook：iAP2 RouteGuidance 解析与转发、原车地图就绪通知转发 | `rgi_meta/libcarplay_rgi_meta.so` |
 | `Toolbox/carplay_alt_screen/rgi_renderer/` | 转向箭头 / 车道引导渲染器 | `rgi_renderer/release/maneuver_render` |
-| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook：Context80、仪表图层、RGI 分发、滚轮事件；`stubs/` 为编译用原车接口桩，`vendor/` 为基线 JAR | `hmi/carplay_hook-basevideo3.jar` |
+| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook：Context80、仪表图层、RGI 分发、滚轮事件、原车地图启动等待；`stubs/` 为编译用原车接口桩，`vendor/` 为基线 JAR | `hmi/carplay_hook-basevideo3.jar` |
 | `Toolbox/scripts/`、`Toolbox/GEM/` | 安装 / 启动 / 状态 / 恢复 / 诊断脚本与绿色菜单 | 随 SD 卡使用 |
 | `Tools/`、`BUILD-*.sh` | 构建与校验工具 | — |
 
@@ -264,7 +272,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.7Fix4`**）。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
+   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.7 Fix5`**），菜单中只有 `INSTALL NO RGI`、`INSTALL WITH RGI` 和 `RESTORE ORIGINAL` 三项。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
 
 5. 如果此时仍提示：
 
@@ -293,33 +301,33 @@ Script not found:
    [5/5] Verifying installation...              最终校验
    ```
 
-4. 看到 `RESULT: SUCCESS` 后，**完整重启车机一次**，然后连接 iPhone、进入 CarPlay 并启动导航，观察 Virtual Cockpit 是否出现第二屏画面且能随导航更新。
+4. 看到 `RESULT: SUCCESS` 后，**完整重启车机一次**，然后连接 iPhone、进入 CarPlay 并启动导航，观察 Virtual Cockpit 是否出现第二屏画面且能随导航更新。冷启动时第二屏要等原车仪表地图加载完成后才会出现，这是正常的。
 5. 如果显示 `RESULT: FAILED`，结论下方会写明失败在哪一步、车机当前处于什么状态（未改动 / 已回滚 / 已恢复原车）以及下一步该怎么做，按提示操作即可。完整过程记录在 `Log:` 所示的 SD 卡日志中。
 
-`STATUS` 中的 `INSTALL_RGI_MODE=WITH / NO` 显示当前安装模式。要切换模式，直接用另一种模式重新执行 INSTALL 即可，安装程序会先自动卸载当前版本。
+安装模式记录在 SD 卡安装日志（`MMI-Cockpit-Carplay/logs/operations/install_*.log`）的 `INSTALL_RGI_MODE=WITH / NO` 中。要切换模式，直接用另一种模式重新执行 INSTALL 即可，安装程序会先自动卸载当前版本。
 
 > [!NOTE]
-> GitHub Releases 中发布的安装包会在第二屏启动时显示开屏水印，属于正常现象。它不是整车开机 Logo。
+> 第二屏启动时会先播放约 5 秒的开屏视频（铺满仪表），然后切换到 CarPlay 画面，属于正常现象。它不是整车开机 Logo。
 
-### 5. 查看状态和排查
+### 5. 排查
 
-- 在 CarPlay 导航运行时打开 `STATUS`。`PHYSICAL_ROUTE_READY=SOFTWARE_CHAIN_COMPLETE` 表示脚本观察到视频解码、显示链路和 Context 80 等软件条件；仍须**亲眼确认仪表实际显示画面**。`PHYSICAL_ROUTE_READY=NO` 表示条件未齐，按输出中的缺失项检查。
+- 判断是否成功以**仪表实际显示画面**为准。
 - 若完全看不到 `MMI-Cockpit-Carplay` 菜单，先确认上游绿菜单正常、SD 卡目录层级正确，并确认 `MQBCoding → Update Toolbox` 已成功执行。
 - 若 `Update Toolbox` 本身报 `Script not found`，这是上游 Toolbox 基础安装问题，不是本项目第二屏安装脚本的问题；先用上游完整包通过红色软件更新菜单修复 Toolbox。
+- 若冷启动后仪表一直没有第二屏，先确认原车导航地图能在仪表上正常显示。本项目要等原车仪表地图初始化完成才会请求第二屏，原车地图起不来时第二屏也不会出现。开机日志 `hook_tmp.log` 中有 `PHASE=OEM_MAP_READY` 表示已放行；只有 `PHASE=ALT111_REQUEST_DEFERRED ... reason=oem_map_not_initialized` 表示仍在等待原车地图。
 - 若百度地图在仪表上不显示，或高德地图画面比例异常，先确认 iPhone 系统为 iOS 18 或更高版本（推荐 iOS 26）。
-- 若 SD 卡找不到，核对 FAT32、卡根目录文件和读写状态。若 `STATUS` 不就绪，确认已连接 CarPlay 且导航正在输出，再记录状态及日志；不要反复重新安装。
-- `STORE LOGS + RESTORE` 会尽力保存诊断日志，**随后立即恢复原车配置**；它不是只导出日志的按钮。需要保留第二屏运行时，不要选择它。
+- 若 SD 卡找不到，核对 FAT32、卡根目录文件和读写状态。第二屏没有画面时，先确认已连接 CarPlay 且导航正在输出，再保存日志反馈；不要反复重新安装。
 
 ### 6. 日志
 
-- 运行中的日志位于车机 `/tmp/MMI-Cockpit-Carplay/`，包括 private111 建连与断开、H.264、Screen 读取、decoded SHM、显示帧率、displayable3、Context80、viewArea 与布局状态，以及 CPU / 温度 / 内存等系统诊断。
-- RGI 渲染器日志位于 `/tmp/maneuver_render.log`。
-- 执行 `STORE LOGS + RESTORE` 后，日志保存在 SD 卡的 `MMI-Cockpit-Carplay/logs/` 目录。
-- 出现问题时请先保存完整日志，再修改配置或代码。反馈问题时请附上日志，并说明固件版本与地区、Classic / Sport 和 FULL / SMALL 布局，以及连接方式（先插手机再启动车机 / 车机完全启动后再插手机 / 快速重连）。
+- 安装后，每次开机的运行日志会自动保存到 SD 卡的 `MMI-Cockpit-Carplay/logs/boots/boot_*/` 目录（开机时需插着 SD 卡），包括 private111 建连与断开、H.264、Screen 读取、decoded SHM、显示帧率、displayable3、Context80、viewArea 与布局状态、防火墙规则和网络状态，以及原车系统日志。
+- 安装、复原等操作的日志保存在 SD 卡的 `MMI-Cockpit-Carplay/logs/operations/` 目录。
+- 车机上运行中的日志位于 `/tmp/`，例如 `/tmp/altscreen_hook.log`、RGI 渲染器的 `/tmp/maneuver_render.log`。
+- 出现问题时请先保存完整日志，再修改配置或代码。反馈问题时请附上 SD 卡上整个 `MMI-Cockpit-Carplay/logs/` 目录，并说明固件版本与地区、Classic / Sport 和 FULL / SMALL 布局，以及连接方式（先插手机再启动车机 / 车机完全启动后再插手机 / 快速重连）。
 
 ### 7. 恢复原车
 
-1. 插入保留了 `MMI-Cockpit-Carplay` 原车备份目录的 SD 卡，在菜单选择 `RESTORE ORIGINAL`；若要先收集日志再恢复，选择 `STORE LOGS + RESTORE`。
+1. 插入保留了 `MMI-Cockpit-Carplay` 原车备份目录的 SD 卡，在菜单选择 `RESTORE ORIGINAL`。之前开机的日志已经自动保存在 SD 卡上，复原前无需另外导出。
 2. 等待屏幕出现 `RESULT:` 结论。`RESULT: SUCCESS` 表示已恢复原车配置，然后完整重启车机。恢复会停止显示进程、释放 Context80 显示需求、移除启动项、删除本项目的 HMI JAR，并还原安装前保存的 HMI 文件和 preload 相关配置。
 3. 如果显示 `RESULT: FAILED`，按结论下方的提示操作；若提示 rollback 不完整，**不要重启**，先再次执行 `RESTORE ORIGINAL`。车机本来就是原车状态时会显示 `RESULT: NOTHING TO RESTORE`。
 
@@ -336,7 +344,7 @@ Script not found:
 5. 救车模式允许覆盖内容不同的系统二进制及配置文件，包括 `dio_manager`、`libairplay.so`、`libNmeBaseClasses.so`、两个 CarPlay 配置 JSON 和 `pf.conf`。写回前会保存本车当前状态的独立事务快照，失败时尝试回滚到救车前状态；这份快照不是新的“纯净原车备份”，不会替换借来的或自己的原车备份。此前中断的事务会保留在 `install-transaction/rescue-preserved.*` 或 `restore-transaction/rescue-preserved.*`，不会作为救车写回数据。
 6. 等待 **`RESULT: RESCUE SUCCESS`**，保存日志，删除 SD 卡上的 **`MMI-Cockpit-Carplay/RESCUE_RESTORE`**，然后完整重启车机。若失败，按界面提示处理；不要因为留下标记就认为已经复原成功。
 
-这个标记只对手动复原生效，即 `RESTORE ORIGINAL` 和 `STORE LOGS + RESTORE`。只要标记还在，之后每次手动复原都会按救车模式执行，所以救车完成后一定要删除它。**INSTALL 的自动卸载始终使用普通严格检查，即使 SD 卡上有救车标记也不会自动覆盖不匹配的文件。** 救车模式只恢复本项目备份覆盖的文件，不能代替完整固件刷写，也不能保证修复其他系统文件损坏。
+这个标记只对手动复原 `RESTORE ORIGINAL` 生效。只要标记还在，之后每次手动复原都会按救车模式执行，所以救车完成后一定要删除它。**INSTALL 的自动卸载始终使用普通严格检查，即使 SD 卡上有救车标记也不会自动覆盖不匹配的文件。** 救车模式只恢复本项目备份覆盖的文件，不能代替完整固件刷写，也不能保证修复其他系统文件损坏。
 
 ### 8. 从旧版本升级
 
@@ -389,7 +397,7 @@ GPL-3.0 允许任何人使用、研究、修改和再分发本项目，包括商
 
 ~~~text
 main
-└── AUG22 / V3.7Fix4
+└── AUG22 / V3.7Fix5
     ├── 中国区（CN）固件：实车测试可用
     ├── 欧洲区（ER）部分固件：用户实车反馈可用（P5092 / P5152，MU 1329）
     └── 其他地区固件：可能存在未知 BUG，不保证 100% 可用
@@ -398,6 +406,15 @@ main
 当前公开版本以稳定、可安装、可恢复为优先目标。
 
 ### 更新记录
+
+**V3.7Fix5**
+
+- 第二屏数据端口固定为 TCP 6031：安装时在车机防火墙配置 `pf.conf` 中写入放行规则，开机随原车配置加载，建立第二屏时不再临时执行 `pfctl`。修复冷启动时 `pfctl` 超时导致的仪表黑屏，以及 LTE 换 IP 时原车重新加载防火墙配置、运行时放行规则丢失导致的仪表断流。写入前用 `pfctl` 检查：原配置能解析而加入规则后不能解析时，不写入并退回随机端口加运行时规则，不判安装失败。
+- 冷启动时等原车仪表地图（MapKombi）初始化完成后，再向 iPhone 请求第二屏画面并启动仪表显示；CarPlay 主屏和第二屏协商不受影响。
+- `INSTALL NO RGI` 模式下也启动 HMI 与 hook 之间的本机总线，原车地图就绪通知经由它传递。
+- 修复 RGI 车道引导只在导航刚开始时显示、之后消失的问题：车道数据使用独立的编号，不再按转向编号清理缓存。
+- 开屏视频更新，1440×455 逐像素铺满仪表平面，不再缩放居中。
+- 绿色菜单精简为 `INSTALL NO RGI`、`INSTALL WITH RGI`、`RESTORE ORIGINAL` 三项，移除 `STATUS` 和 `STORE LOGS + RESTORE`；安装后每次开机日志自动保存到 SD 卡。版本标识更新为 `V3.7 Fix5`。
 
 **V3.7Fix4**
 
