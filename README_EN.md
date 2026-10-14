@@ -6,6 +6,8 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 **V3.7 update: full RGI navigation-data integration is now available (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)), color conversion for the secondary display now runs on the GPU, cutting whole-system CPU usage from about 80% to about 20%, the runtime watermark has been removed, and starting with V3.7 the whole project is open source under GPL-3.0.**
 
+**Wireless CarPlay: tested with the 君用 (Junyong) M2Pro wireless adapter on its latest beta firmware, which fully supports the cluster display, RGI, steering-wheel zoom and CarPlay projection.**
+
 **V3.7Fix6 update: fixes the missing secondary display on the cluster once the LTE data link is up. The head unit then switches to per-uplink firewall configurations such as `pf.ecm0.conf`, and the installer now writes the 6031 pass rule into those as well.**
 
 **V3.7Fix5 update: the secondary-display data port is fixed at 6031 and written into the head unit's firewall configuration, fixing the black cluster at cold start and cluster dropouts when LTE changes IP; at cold start the secondary display waits until the stock cluster map has loaded; fixes RGI lane guidance disappearing mid-route; the startup video now fills the cluster 1:1; the green menu is trimmed to three entries, and boot logs are saved to the SD card automatically.**
@@ -54,6 +56,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 - Native CarPlay AltScreen
 - The main CarPlay display remains available and unaffected
+- Wireless CarPlay: the 君用 (Junyong) M2Pro wireless adapter on its latest beta firmware has been tested to support the cluster display, RGI, wheel zoom and CarPlay projection
 - Full RGI navigation-data integration (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi))
   - Maneuver arrows and lane guidance on the cluster
   - Can be enabled or left out at install time (`INSTALL WITH RGI` / `INSTALL NO RGI`)
@@ -78,6 +81,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 | China-region (CN) firmware | ✅ Vehicle-tested and works normally |
 | Some European-region (ER) firmware | ✅ Reported working in vehicles by users (for example `MHI2Q_ER_AUG22_P5092` / `P5152`, MU 1329) |
 | Other ER versions, US and other regional firmware | ⚠️ May have unknown bugs; not guaranteed to work 100% |
+| Wireless CarPlay adapter | ✅ 君用 (Junyong) **M2Pro** on its latest beta firmware: tested with full support for the cluster display, RGI, wheel zoom and CarPlay projection |
 | iPhone iOS version | ✅ **iOS 26** recommended; ⚠️ below iOS 18, Baidu Maps may not support the cluster display and Amap (Gaode) may show the map with the wrong aspect ratio |
 
 > [!TIP]

@@ -22,6 +22,8 @@ extern int altscreen_runtime_wait_ready(unsigned timeout_ms)
 #define ALTSCREEN_NEGOTIATION_WAIT_MS 500u
 #define ALT111_BOOTSTRAP_WIDTH 1440u
 #define ALT111_BOOTSTRAP_HEIGHT 542u
+#define ALT111_PANEL_WIDTH_PX 1440u
+#define ALT111_PANEL_WIDTH_MM 292u
 
 static volatile uint32_t g_alt_advertised_width;
 static volatile uint32_t g_alt_advertised_height;
@@ -855,8 +857,18 @@ void *alt_build_cluster_display(void) {
     altscreen_log("PHASE=ALT111_INFO_GEOMETRY_CONTRACT advertised=%ux%u provisional=%d live_geometry=%d renderer_must_match=1",
                   d->width_pixels, d->height_pixels, geometry_provisional,
                   geometry_provisional ? 0 : 1);
-    /* Match LIVI getInfo.displayEntry when physical panel size is unavailable. */
-    physical_width = d->width_mm ? d->width_mm : 200u;
+    /*
+     * Screen publishes no panel size, so report the MHI2Q virtual cockpit
+     * itself: a 12.3-inch 1440x540 TFT, 292.5 x 109.7 mm (0.203 mm pitch),
+     * onto which the type-111 canvas maps 1:1. The former LIVI 200 mm default
+     * claimed 183 ppi instead of 125 ppi, so iOS scaled third-party cluster
+     * UI (Amap) up by about 1.46x.
+     */
+    physical_width = d->width_mm ? d->width_mm :
+        alt_div_u32(d->width_pixels * ALT111_PANEL_WIDTH_MM +
+                        (ALT111_PANEL_WIDTH_PX >> 1),
+                    ALT111_PANEL_WIDTH_PX);
+    if (!physical_width) physical_width = 1u;
     physical_height = d->height_mm;
     if (!physical_height) {
         uint32_t scaled = physical_width * d->height_pixels;
@@ -864,6 +876,10 @@ void *alt_build_cluster_display(void) {
                                       d->width_pixels);
         if (!physical_height) physical_height = 1u;
     }
+    altscreen_log("PHASE=ALT111_PHYSICAL_SIZE mm=%ux%u pixels=%ux%u source=%s",
+                  physical_width, physical_height,
+                  d->width_pixels, d->height_pixels,
+                  d->width_mm ? "SCREEN" : "MHI2Q_VC_12.3IN_1440x540");
     if (!cf_dict_create_mutable || !cf_str_new || !cf_num_new || !cf_dict_set || !cf_release)
         return NULL;
     dict = cf_dict_create_mutable(NULL, 0, NULL, NULL, NULL);
