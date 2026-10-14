@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 extern void altscreen_log(const char *fmt, ...);
+extern int alt_oem_map_startup_ready(void);
 
 #define P111_AVCC_CACHE_SLOTS 8u
 #define P111_AVCC_CACHE_MAX   512u
@@ -112,6 +113,8 @@ static int stream_ready_publish(void) {
     ssize_t wr;
     if (__sync_lock_test_and_set(&stream_ready_publish_busy, 1u)) return 0;
     if (stream_ready_retry_pending && (uint32_t)(retry_now - stream_ready_retry_at) < 2000000u) goto out;
+    /* The display (logo and picture) starts only after the OEM cluster map. */
+    if (!alt_oem_map_startup_ready()) goto out;
     tap_lock();
     pid = (uint32_t)getpid();
     if (!g_stream || !g_generation || !g_h264 || !g_frame ||

@@ -108,6 +108,9 @@
 #define CMD_ALT_RGI             0x0116  /* binary [u8 0=off 1=on] — Java's     */
                                         /* confirmed RGI presentation; hook    */
                                         /* picks the Maps cluster URL (showUI) */
+#define CMD_OEM_MAP_READY       0x0119  /* binary [u8 1] — OEM MapKombi is     */
+                                        /* initialized; AltScreen may now ask  */
+                                        /* the phone for the cluster picture   */
 /* NOTE: dispatchable inbound types must be < MAX_TYPES in bus.c (grown to      */
 /* cover this 0x11x block).                                                     */
 

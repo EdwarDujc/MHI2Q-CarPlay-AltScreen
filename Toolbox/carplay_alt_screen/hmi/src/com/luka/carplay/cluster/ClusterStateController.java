@@ -132,6 +132,9 @@ public final class ClusterStateController {
 
     public static void start(IFrameworkAccess fw) {
         if (fw != null) frameworkAccess = fw;
+        /* Boot entry (DisplayManagerMIB2High): the OEM map gate must run from
+         * boot, before any phone connects. Idempotent. */
+        com.luka.carplay.core.OemMapStartupGate.start();
         synchronized (LOCK) {
             if (worker != null && worker.isAlive()) {
                 LOCK.notifyAll();

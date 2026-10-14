@@ -18,6 +18,11 @@ extern int alt_flag_iap2;
 
 void p1404_airplay_bind(void);
 void p1404_airplay_load_flags(void);
+/* OEM cluster map startup gate: Java reports MapKombi.isInitialized() once
+ * over bus 0x0119 (RGI library -> dlsym). Until then showUI/forceKeyFrame and
+ * the display start wait; capabilities and Main110 are not delayed. */
+int alt_oem_map_startup_ready(void);
+void altscreen_oem_map_ready(int ready);
 int alt_request_cluster_after_main(void *receiver);
 void *alt_build_cluster_display(void);
 void *alt_info_add_cluster_display(void *container);

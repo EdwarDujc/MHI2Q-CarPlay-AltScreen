@@ -1385,7 +1385,10 @@ static void *native_monitor_worker(void *arg) {
                 slot->view_area_frame_pending = 0;
                 slot->view_area_frame_baseline_valid = 0;
             }
+        }
 
+        /* Nothing is asked of the phone before the OEM cluster map is up. */
+        if (live && alt_oem_map_startup_ready()) {
             if (desired_view_area == 0 || desired_view_area == 1) {
                 if (slot->view_area_target != desired_view_area) {
                     altscreen_log("PHASE=ALT111_VIEWAREA_TARGET receiver=%p stream=%p generation=%u old=%d new=%d source=/tmp/mmi-mirror-hmi.state gate=LayoutMIB2HighB9OrQ7 config=%ux%u canvas_gate=%d",

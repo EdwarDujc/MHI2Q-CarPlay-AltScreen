@@ -12,12 +12,17 @@
 static struct {
     void *receiver;
     int main_ready, sent, worker, pending, failed, show_ack, key_ack, local_failed;
+    int wait_logged;
     uint32_t token, request;
 } bootstrap[8];
 static volatile unsigned bootstrap_guard;
+static volatile unsigned oem_map_ready;
 static uint32_t bootstrap_token;
 struct bootstrap_job { void *receiver; unsigned slot; uint32_t token; };
 
+int alt_oem_map_startup_ready(void) {
+    return __sync_fetch_and_add(&oem_map_ready, 0u) != 0u;
+}
 static void bootstrap_lock(void) {
     while (__sync_lock_test_and_set(&bootstrap_guard, 1u)) p1404_lock_wait_yield();
 }
@@ -128,43 +133,42 @@ static void *bootstrap_worker(void *opaque) {
     free(job);
     return NULL;
 }
-static void bootstrap_note(void *receiver, int main_ready) {
-    unsigned i, slot = 8;
+/* bootstrap_lock held. Reserves the single worker for one slot, or records
+ * why the request is still waiting (logged once per slot by the caller). */
+static struct bootstrap_job *bootstrap_reserve_locked(unsigned slot, int *wait_reason) {
     void *event_client = NULL;
-    struct bootstrap_job *job = NULL;
+    void *receiver = bootstrap[slot].receiver;
+    struct bootstrap_job *job;
+    *wait_reason = 0;
+    if (!receiver || !bootstrap[slot].main_ready || bootstrap[slot].sent ||
+        bootstrap[slot].worker) return NULL;
+    /* SessionStart publishes the stock event client at this measured offset. */
+    memcpy(&event_client, (const unsigned char *)receiver + 0x2c0, sizeof(event_client));
+    if (!event_client || !alt_oem_map_startup_ready()) {
+        if (!bootstrap[slot].wait_logged) {
+            bootstrap[slot].wait_logged = 1;
+            *wait_reason = event_client ? 1 : 2;
+        }
+        return NULL;
+    }
+    job = malloc(sizeof(*job));
+    if (!job) return NULL;
+    job->receiver = receiver; job->slot = slot; job->token = bootstrap[slot].token;
+    bootstrap[slot].worker = 1;
+    return job;
+}
+static void bootstrap_log_wait(void *receiver, int wait_reason) {
+    if (wait_reason)
+        altscreen_log("PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=%s capabilities=EARLY Main110=UNCHANGED",
+                      receiver, wait_reason == 1 ? "oem_map_not_initialized" : "event_channel_not_started");
+}
+/* Outside every lock. The worker owns one receiver reference. */
+static void bootstrap_spawn(struct bootstrap_job *job) {
     pthread_t thread;
-    int rc = -1, deferred = 0;
+    int rc = -1;
     int (*detach_fn)(pthread_t) = (int (*)(pthread_t))dlsym(RTLD_DEFAULT, "pthread_detach");
-    if (!receiver) return;
-    bootstrap_lock();
-    for (i = 0; i < 8; ++i) {
-        if (bootstrap[i].receiver == receiver) { slot = i; break; }
-        if (!bootstrap[i].receiver && slot == 8) slot = i;
-    }
-    if (slot < 8) {
-        if (!bootstrap[slot].receiver) {
-            bootstrap[slot].token = bootstrap_identity_locked();
-            if (bootstrap[slot].token) bootstrap[slot].receiver = receiver;
-        }
-        if (main_ready) bootstrap[slot].main_ready = 1;
-        memcpy(&event_client, (const unsigned char *)receiver + 0x2c0, sizeof(event_client));
-        deferred = bootstrap[slot].main_ready && !event_client;
-        if (bootstrap[slot].receiver && bootstrap[slot].main_ready && event_client &&
-            !bootstrap[slot].sent && !bootstrap[slot].worker && detach_fn) {
-            job = malloc(sizeof(*job));
-            if (job) {
-                job->receiver = receiver; job->slot = slot; job->token = bootstrap[slot].token;
-                bootstrap[slot].worker = 1;
-            }
-        }
-    }
-    bootstrap_unlock();
-    if (deferred)
-        altscreen_log("PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=event_channel_not_started waiting=SessionStart", receiver);
-    if (slot == 8)
-        altscreen_log("ERROR PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=bootstrap_slots_full", receiver);
-    if (!job) return;
-    if (!alt_airplay_retain_object(receiver)) goto failed;
+    void *receiver = job->receiver;
+    if (!detach_fn || !alt_airplay_retain_object(receiver)) goto failed;
     rc = pthread_create(&thread, NULL, bootstrap_worker, job);
     if (!rc) {
         int detach_rc = detach_fn(thread);
@@ -178,5 +182,54 @@ failed:
     bootstrap_unlock();
     free(job);
     altscreen_log("ERROR PHASE=ALT111_BOOTSTRAP_WORKER receiver=%p rc=%d retry_requires_lifecycle_notification=1", receiver, rc);
+}
+/* Bus 0x0119 from Java, via the RGI library. Latched once per process: hiding
+ * the OEM map later does not close the gate again. */
+void altscreen_oem_map_ready(int ready) {
+    struct bootstrap_job *jobs[8];
+    void *waiting[8];
+    int reasons[8];
+    unsigned i, latched = 0;
+    if (!ready) return;
+    bootstrap_lock();
+    if (!oem_map_ready) {
+        __sync_lock_test_and_set(&oem_map_ready, 1u);
+        latched = 1;
+    }
+    for (i = 0; i < 8; ++i) {
+        waiting[i] = bootstrap[i].receiver;
+        jobs[i] = bootstrap_reserve_locked(i, &reasons[i]);
+    }
+    bootstrap_unlock();
+    if (latched)
+        altscreen_log("PHASE=OEM_MAP_READY source=Java_NavigationJobs bus=0119 boot_latched=1");
+    for (i = 0; i < 8; ++i) {
+        bootstrap_log_wait(waiting[i], reasons[i]);
+        if (jobs[i]) bootstrap_spawn(jobs[i]);
+    }
+}
+static void bootstrap_note(void *receiver, int main_ready) {
+    unsigned i, slot = 8;
+    struct bootstrap_job *job = NULL;
+    int wait_reason = 0;
+    if (!receiver) return;
+    bootstrap_lock();
+    for (i = 0; i < 8; ++i) {
+        if (bootstrap[i].receiver == receiver) { slot = i; break; }
+        if (!bootstrap[i].receiver && slot == 8) slot = i;
+    }
+    if (slot < 8) {
+        if (!bootstrap[slot].receiver) {
+            bootstrap[slot].token = bootstrap_identity_locked();
+            if (bootstrap[slot].token) bootstrap[slot].receiver = receiver;
+        }
+        if (main_ready) bootstrap[slot].main_ready = 1;
+        job = bootstrap_reserve_locked(slot, &wait_reason);
+    }
+    bootstrap_unlock();
+    if (slot == 8)
+        altscreen_log("ERROR PHASE=ALT111_REQUEST_DEFERRED receiver=%p reason=bootstrap_slots_full", receiver);
+    bootstrap_log_wait(receiver, wait_reason);
+    if (job) bootstrap_spawn(job);
 }
 #endif

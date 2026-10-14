@@ -14,7 +14,7 @@ CC=arm-unknown-nto-qnx6.5.0eabi-gcc
 CXX=arm-unknown-nto-qnx6.5.0eabi-g++
 NM=arm-unknown-nto-qnx6.5.0eabi-nm
 cd "$SRC/rgi_native/src"
-SRCS="framework/logging.c framework/state_trace.c framework/signal_guard.c framework/bus.c framework/iap2_protocol.c framework/hook_framework.c routeguidance/rgd_tlv.c routeguidance/rgd_hook.c coverart/jpeg_safety.c coverart/coverart_stream.c coverart/coverart_hook.c main.c"
+SRCS="framework/logging.c framework/state_trace.c framework/signal_guard.c framework/bus.c framework/iap2_protocol.c framework/hook_framework.c routeguidance/rgd_tlv.c routeguidance/rgd_hook.c coverart/jpeg_safety.c coverart/coverart_stream.c coverart/coverart_hook.c oemmap/oem_map_gate.c main.c"
 $CC -shared -fPIC -O2 -std=gnu99 -D__QNX__ -fvisibility=hidden -fdata-sections -ffunction-sections -I. $SRCS -o "$OUT/libcarplay_rgi_meta.so" -Wl,--gc-sections -Wl,--version-script="$SRC/rgi_native/src/carplay_hook.exports.map" -l:libz.so.2 -lsocket
 awk '/global:/{g=1;next} /local:/{g=0} g{gsub(/[;[:space:]]/,""); if(length) print}' carplay_hook.exports.map | sort > "$OUT/expected"
 $NM -D --defined-only "$OUT/libcarplay_rgi_meta.so" | awk 'NF>=3{print $3}' | sort > "$OUT/actual"

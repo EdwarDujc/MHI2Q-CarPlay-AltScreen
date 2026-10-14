@@ -1060,6 +1060,7 @@ static int alt_send_cluster_event_impl(void *receiver, void *stream,
     if (!receiver || (!bootstrap && (!stream || !generation)) ||
         !display || !display->uuid)
         return -1;
+    if (event_kind != ALT111_EVENT_STOP_UI && !alt_oem_map_startup_ready()) return -1;
     if (event_kind == ALT111_EVENT_SHOW_UI) type_name = "showUI";
     else if (event_kind == ALT111_EVENT_FORCE_KEYFRAME ||
              event_kind == ALT111_EVENT_RECOVERY_KEYFRAME) type_name = "forceKeyFrame";

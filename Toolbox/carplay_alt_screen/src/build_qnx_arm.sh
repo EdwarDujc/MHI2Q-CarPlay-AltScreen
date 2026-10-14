@@ -170,6 +170,8 @@ ScreenStreamStart
 _ScreenStreamSetProperty
 _ZN3dio13CScreenRender6configERKNS_16st_screen_configE
 _ZN3dio13CScreenRender6renderEPh
+alt_oem_map_startup_ready
+altscreen_oem_map_ready
 close
 recv
 screen_create_window_buffers
@@ -216,7 +218,9 @@ for marker in \
   'response_gates_next=0' \
   'PHASE=SESSION_LIFECYCLE_ENTER' \
   'complete_session_serialization=1' \
-  'PHASE=TEARDOWN_DUPLICATE'
+  'PHASE=TEARDOWN_DUPLICATE' \
+  'PHASE=OEM_MAP_READY' \
+  'oem_map_not_initialized'
 do
   grep -a -Fq "$marker" "$SO" || {
     echo "QNX_BUILD_FAIL missing runtime marker: $marker" >&2

@@ -129,9 +129,10 @@ public class CarPlayHook {
         CursorController.getInstance();
 
         /* Kick the bus up front so every module has a live channel
-         * to the hook before the first CarPlay event fires.
+         * to the hook before the first CarPlay event fires.  Both install
+         * modes: the OEM map gate (0x0119) needs it even without RGI.
          * Idempotent. */
-        if (!isRgiDisabled()) CarplayBus.getInstance().start();
+        CarplayBus.getInstance().start();
 
         active = true;
         carplayPresent = true;
