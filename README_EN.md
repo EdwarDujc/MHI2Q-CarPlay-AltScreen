@@ -20,6 +20,28 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 > - **By using this project you accept these risks and take full responsibility for the consequences. The authors and contributors accept no liability for any problem arising from using, installing, restoring or modifying this project, including but not limited to head-unit faults, malfunctions, failure to boot, data loss, voided warranty, or any other direct or indirect damage.**
 > - If you do not agree to these terms, do not install or use this project.
 
+> [!CAUTION]
+> **Public statement: we strongly condemn VWODIS (一车网) for stripping the authors' names and license from this project and reposting it to draw traffic**
+>
+> VWODIS (一车网, QQ: **296520384**) has published this project on its website as "【Software】Audi MHI2Q-CARPLAY-Altscreen Native Second-Screen Navigation Activation Software V3.7" ([en.vwodis.com/20912.html](https://en.vwodis.com/20912.html)), with login, paid-points and membership download gates. The listing:
+>
+> - does not name the original authors or link to this GitHub repository;
+> - does not include the GPL-3.0 license or any way to obtain the source code;
+> - takes its description from this project's README.
+>
+> GPL-3.0 allows charging for copies, but anyone who redistributes this project must keep the authors' copyright and license notices and provide the complete source code (sections 4 and 6). Redistributing in violation of the license automatically terminates all rights granted under it (section 8). When the author contacted them, they admitted posting it, then replied: "We haven't kept the source closed, and it isn't encrypted", "It's just to attract traffic", "What does it have to do with you?" and "Then just don't publish it."
+>
+> **We strongly condemn taking open-source authors' work to draw traffic for themselves while erasing the authors' names and license, and we demand that they correct the listing or take it down immediately.**
+>
+> **This project is published free of charge only on GitHub ([yuedizhibo/MHI2Q-CarPlay-AltScreen](https://github.com/yuedizhibo/MHI2Q-CarPlay-AltScreen)). Any paid, points-based or membership download channel has nothing to do with the authors.** Files from third-party channels may be modified or mixed with old versions; download only from this repository's Releases.
+
+<details>
+<summary>Chat with the site operator (in Chinese, click to expand)</summary>
+
+<img src="docs/vwodis-chat.jpg" width="380" alt="Chat with VWODIS (一车网)">
+
+</details>
+
 > [!NOTE]
 > **Sister project: MMI Mirror**  
 > If you want to mirror the **entire MMI center display** instead of using the native CarPlay secondary display, see:  
