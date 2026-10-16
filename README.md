@@ -23,7 +23,7 @@
 > [!CAUTION]
 > **严正声明：强烈谴责 VWODIS（一车网）抹去作者署名与许可、搬运本项目引流**
 >
-> VWODIS（一车网，QQ：**296520384**）把本项目以「【Software】Audi MHI2Q-CARPLAY-Altscreen Native Second-Screen Navigation Activation Software V3.7」为名发布在其网站上（[en.vwodis.com/20912.html](https://en.vwodis.com/20912.html)），页面带有登录、付费积分、会员等下载门槛。该页面：
+> VWODIS（一车网，QQ：**296520384**）于 10 月 13 日把本项目以「【软件】奥迪 MHI2Q-CARPLAY-Altscreen 原生第二屏导航激活软件 V3.7」为名发布在其网站上（en.vwodis.com/20912.html，现已删除），标价 **$200**（通用用户组）或 2000 积分（"中士"等级），登录后才能下载。该页面：
 >
 > - 没有注明原作者，也没有给出本项目的 GitHub 地址；
 > - 没有附带 GPL-3.0 许可证，也没有提供源码获取方式；
@@ -36,7 +36,11 @@
 > **本项目只在 GitHub（[yuedizhibo/MHI2Q-CarPlay-AltScreen](https://github.com/yuedizhibo/MHI2Q-CarPlay-AltScreen)）免费发布，任何收费、积分或会员下载渠道都与作者无关。** 第三方渠道的文件可能被修改或混入旧版文件，请只从本仓库的 Release 下载。
 
 <details>
-<summary>与对方的聊天记录（点击展开）</summary>
+<summary>证据截图：对方页面、标价与聊天记录（点击展开）</summary>
+
+<img src="docs/vwodis-listing.jpg" width="720" alt="VWODIS（一车网）发布本项目的页面">
+
+<img src="docs/vwodis-price.jpg" width="720" alt="VWODIS（一车网）页面上的下载标价：$200 或 2000 积分">
 
 <img src="docs/vwodis-chat.jpg" width="380" alt="与 VWODIS（一车网）的聊天记录">
 
