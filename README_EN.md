@@ -23,11 +23,11 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 > [!CAUTION]
 > **Public statement: we strongly condemn VWODIS (一车网) for stripping the authors' names and license from this project and reposting it to draw traffic**
 >
-> On October 13, VWODIS (一车网, QQ: **296520384**) published this project on its website as "【Software】Audi MHI2Q-CARPLAY-Altscreen Native Second-Screen Navigation Activation Software V3.7" (en.vwodis.com/20912.html, now deleted), priced at **$200** for the general user group or 2,000 points at the "Sergeant" (中士) level, with login required to download. The listing:
+> On October 13, VWODIS (一车网, QQ: **296520384**) published this project on its website as "【Software】Audi MHI2Q-CARPLAY-Altscreen Native Second-Screen Navigation Activation Software V3.7" ([en.vwodis.com/20912.html](https://en.vwodis.com/20912.html)), priced at **$200** for the general user group or 2,000 points at the "Sergeant" (中士) level, with login required to download. The listing:
 >
-> - did not name the original authors or link to this GitHub repository;
-> - did not include the GPL-3.0 license or any way to obtain the source code;
-> - took its description from this project's README.
+> - does not name the original authors or link to this GitHub repository;
+> - does not include the GPL-3.0 license or any way to obtain the source code;
+> - takes its description from this project's README.
 >
 > GPL-3.0 allows charging for copies, but anyone who redistributes this project must keep the authors' copyright and license notices and provide the complete source code (sections 4 and 6). Redistributing in violation of the license automatically terminates all rights granted under it (section 8). When the author contacted them, they admitted posting it, then replied: "We haven't kept the source closed, and it isn't encrypted", "It's just to attract traffic", "What does it have to do with you?" and "Then just don't publish it."
 >
