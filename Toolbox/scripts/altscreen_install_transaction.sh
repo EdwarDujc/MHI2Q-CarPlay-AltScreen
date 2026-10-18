@@ -556,6 +556,11 @@ verify_installed(){
       ;;
     *) log "INSTALL_VERIFY=FAIL reason=INVALID_RGI_MODE"; return 1 ;;
   esac
+  case "${ALTS_INSTALL_CARD_MODE:-NO}" in
+    WITH) [ -f "$RUNTIME/state/card.enabled" ] || { log "INSTALL_VERIFY=FAIL reason=CARD_MARKER_MISSING"; return 1; } ;;
+    NO) [ ! -e "$RUNTIME/state/card.enabled" ] || { log "INSTALL_VERIFY=FAIL reason=CARD_UNEXPECTEDLY_ENABLED"; return 1; } ;;
+    *) log "INSTALL_VERIFY=FAIL reason=INVALID_CARD_MODE"; return 1 ;;
+  esac
   same "$UNIVERSAL_SOURCE" "$UNIVERSAL_DST" ||
     { log "INSTALL_VERIFY=FAIL reason=UNIVERSAL_HOOK_MISMATCH"; return 1; }
   same "$VOLUME/Toolbox/carplay_alt_screen/rgi_meta/libcarplay_rgi_meta.so" "$RUNTIME/lib/libcarplay_rgi_meta.so" ||

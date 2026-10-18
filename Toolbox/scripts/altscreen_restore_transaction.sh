@@ -732,7 +732,7 @@ case "$ALTS_PREVIOUS" in
   *runtime*|*hmi*|*preload*|*autostart*) ;;
   *)
     if [ ! -e "$LEGACY_HOOK" ] && [ ! -e "$STAGE" ] && [ ! -e "$PREV" ] &&
-       ! grep -Eq '"0x520[0-4]"' "$DIO" 2>/dev/null &&
+       ! grep -Eq '"0x520[0-4]"|"0x417[01]"' "$DIO" 2>/dev/null &&
        ! grep -Eq 'ALTSCREEN|ALT111' "$PF" 2>/dev/null &&
        ! grep -Fqx '# BEGIN ALTSCREEN TYPE111 FIREWALL' "$PF_DIR"/pf.*.conf 2>/dev/null; then
       if [ "$RESCUE_RESTORE" = 1 ]; then

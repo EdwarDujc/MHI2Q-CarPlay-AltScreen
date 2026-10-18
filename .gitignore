@@ -31,6 +31,8 @@
 !/Toolbox/carplay_alt_screen/hmi/resources/com/luka/carplay/routeguidance/vc-text.bin
 !/Toolbox/carplay_alt_screen/hmi/resources/META-INF/UNICODE-LICENSE.txt
 !/Toolbox/carplay_alt_screen/hmi/vendor/carplay_hook-wheel-v25.jar
+!/Toolbox/carplay_alt_screen/hmi/vendor/SOURCES.md
+!/Toolbox/carplay_alt_screen/hmi/vendor/src/**/*.java
 
 # Map display source, embedded logo asset and production build tools.
 # The .z asset is a build input; it is embedded in the ELF, not shipped separately on SD.
@@ -59,6 +61,7 @@
 !/Toolbox/carplay_alt_screen/rgi_renderer/common/**/*.h
 !/Toolbox/carplay_alt_screen/rgi_renderer/toolchain/qnx65-abi/include/**/*.h
 !/Toolbox/carplay_alt_screen/**/LICENSE*
+!/Toolbox/carplay_alt_screen/NOTICE.md
 
 !/Toolbox/GEM/mqb-carplayAltScreen.esd
 
@@ -90,11 +93,17 @@
 !/Toolbox/scripts/altscreen_restore_transaction.sh
 !/Toolbox/scripts/altscreen_sd_writable.sh
 !/Toolbox/scripts/altscreen_v33_rgi_config.sh
+!/Toolbox/scripts/cluster_card_layout.sh
+!/Toolbox/scripts/cluster_card_left.sh
+!/Toolbox/scripts/cluster_card_right.sh
+!/Toolbox/scripts/cluster_card_top.sh
 !/Toolbox/scripts/finish_mmi_cockpit_carplay_test.sh
 !/Toolbox/scripts/force_start_mmi_cockpit_carplay_rx_test.sh
 !/Toolbox/scripts/install_mmi_cockpit_carplay_rx.sh
 !/Toolbox/scripts/install_mmi_cockpit_carplay_no_rgi.sh
 !/Toolbox/scripts/install_mmi_cockpit_carplay_with_rgi.sh
+!/Toolbox/scripts/install_mmi_cockpit_carplay_with_card.sh
+!/Toolbox/scripts/install_mmi_cockpit_carplay_with_rgi_card.sh
 !/Toolbox/scripts/start_mmi_cockpit_carplay_rx_test.sh
 !/Toolbox/scripts/start_mmi_cockpit_carplay_test.sh
 !/Toolbox/scripts/status_mmi_cockpit_carplay_test.sh

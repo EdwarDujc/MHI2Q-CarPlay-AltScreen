@@ -220,7 +220,13 @@ for marker in \
   'complete_session_serialization=1' \
   'PHASE=TEARDOWN_DUPLICATE' \
   'PHASE=OEM_MAP_READY' \
-  'oem_map_not_initialized'
+  'oem_map_not_initialized' \
+  'PHASE=PHONE_CARD_LAYOUT_TARGET' \
+  'PHASE=PHONE_CARD_UI_REFRESH' \
+  'PHASE=PHONE_CARD_UI_OFFER' \
+  'maneuverLayout=leftaligned' \
+  'maneuverLayout=topaligned' \
+  'maneuverLayout=rightaligned'
 do
   grep -a -Fq "$marker" "$SO" || {
     echo "QNX_BUILD_FAIL missing runtime marker: $marker" >&2

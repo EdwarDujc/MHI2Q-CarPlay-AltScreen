@@ -1,17 +1,31 @@
 #!/bin/sh
-# V3.3 RouteGuidance message-array editor for dio_manager.json.
-# Registers Apple's standard 0x5200..0x5204 RGI message transport only.
+# V3.3 iAP2 message-array editor for dio_manager.json.
+# Message sets (third argument):
+#   rgi        Apple's standard 0x5200..0x5204 RGI message transport (default)
+#   telephony  Communications AcceptCall/EndCall/SwapCalls 0x415B..0x415D,
+#              Hold/MuteStatusUpdate 0x415F/0x4160 and the recents/favorites
+#              ListUpdates 0x4170/0x4171 (rgi_native telephony/tel_hook.c)
+# A set is added only when none of its IDs is present; a partly present set is refused.
 set -u
 
 ACTION=${1:-}
 FILE=${2:-}
+SET=${3:-rgi}
 case "$ACTION" in apply|verify) ;; *)
-  echo "usage: $0 {apply|verify} /path/to/dio_manager.json" >&2
+  echo "usage: $0 {apply|verify} /path/to/dio_manager.json [rgi|telephony]" >&2
   exit 2
   ;;
 esac
+case "$SET" in
+  rgi) TAG=V33_RGI_CONFIG; SENT_IDS="0x5200 0x5203"; RECV_IDS="0x5201 0x5202 0x5204" ;;
+  telephony) TAG=TELEPHONY_CONFIG; SENT_IDS="0x415B 0x415C 0x415D 0x415F 0x4160 0x4170"; RECV_IDS="0x4171" ;;
+  *)
+    echo "usage: $0 {apply|verify} /path/to/dio_manager.json [rgi|telephony]" >&2
+    exit 2
+    ;;
+esac
 [ -n "$FILE" ] && [ -s "$FILE" ] || {
-  echo "V33_RGI_CONFIG=FAIL reason=missing_dio path=$FILE" >&2
+  echo "$TAG=FAIL reason=missing_dio path=$FILE" >&2
   exit 1
 }
 
@@ -58,15 +72,12 @@ array_stats() {
 }
 
 state_of() {
-  file=$1; present=0; absent=0; bad=0
-  for spec in \
-    "MessagesSentByAccessory:0x5200" \
-    "MessagesSentByAccessory:0x5203" \
-    "MessagesReceivedFromDevice:0x5201" \
-    "MessagesReceivedFromDevice:0x5202" \
-    "MessagesReceivedFromDevice:0x5204"
+  file=$1; present=0; absent=0; bad=0; total=0
+  for spec in $(for v in $SENT_IDS; do echo "MessagesSentByAccessory:$v"; done
+                for v in $RECV_IDS; do echo "MessagesReceivedFromDevice:$v"; done)
   do
     key=${spec%%:*}; value=${spec#*:}
+    total=$((total+1))
     set -- $(array_stats "$file" "$key" "$value")
     arrays=${1:-0}; values=${2:-0}
     [ "$arrays" -eq 1 ] || bad=1
@@ -77,8 +88,8 @@ state_of() {
     esac
   done
   if [ "$bad" -ne 0 ]; then echo INVALID
-  elif [ "$present" -eq 5 ]; then echo COMPLETE
-  elif [ "$absent" -eq 5 ]; then echo ABSENT
+  elif [ "$present" -eq "$total" ]; then echo COMPLETE
+  elif [ "$absent" -eq "$total" ]; then echo ABSENT
   else echo MIXED
   fi
 }
@@ -88,22 +99,22 @@ verify_complete() { [ "$(state_of "$1")" = COMPLETE ]; }
 if [ "$ACTION" = verify ]; then
   state=$(state_of "$FILE")
   [ "$state" = COMPLETE ] && {
-    echo "V33_RGI_CONFIG=PASS state=COMPLETE"
+    echo "$TAG=PASS state=COMPLETE"
     exit 0
   }
-  echo "V33_RGI_CONFIG=FAIL state=$state" >&2
+  echo "$TAG=FAIL state=$state" >&2
   exit 1
 fi
 
 state=$(state_of "$FILE")
 case "$state" in
   COMPLETE)
-    echo "V33_RGI_CONFIG=UNCHANGED state=COMPLETE"
+    echo "$TAG=UNCHANGED state=COMPLETE"
     exit 0
     ;;
   ABSENT) ;;
   *)
-    echo "V33_RGI_CONFIG=REFUSED state=$state reason=ambiguous_existing_message_set" >&2
+    echo "$TAG=REFUSED state=$state reason=ambiguous_existing_message_set" >&2
     exit 1
     ;;
 esac
@@ -113,7 +124,7 @@ rm -f "$TMP" 2>/dev/null || true
 trap 'rm -f "$TMP" 2>/dev/null || true' 0
 trap 'exit 130' 1 2 15
 
-awk '
+awk -v sent_ids="$SENT_IDS" -v recv_ids="$RECV_IDS" '
   function find_close(s,start,   i,c,q,e) {
     for (i=start;i<=length(s);i++) {
       c=substr(s,i,1)
@@ -123,6 +134,11 @@ awk '
       else if (c=="]") { depth--; if (depth==0) return i }
     }
     return 0
+  }
+  function quoted(list,   n,i,s,id) {
+    n=split(list,id," "); s=""
+    for (i=1;i<=n;i++) s=s (i>1 ? ", " : "") "\"" id[i] "\""
+    return s
   }
   function leading_ws(s) { match(s,/^[ \t]*/); return substr(s,1,RLENGTH) }
   function nonblank(s) { return s ~ /[^ \t]/ }
@@ -168,7 +184,7 @@ awk '
       if (line !~ /^[ \t]*#/) {
         close_at=find_close(line,1)
         if (close_at>0) {
-          values=(mode=="sent") ? "0x5200 0x5203" : "0x5201 0x5202 0x5204"
+          values=(mode=="sent") ? sent_ids : recv_ids
           flush_multiline(close_at,values)
           active=0; multiline=0
           if (mode=="sent") sent_done++; else recv_done++
@@ -195,7 +211,7 @@ awk '
         start=search+open_rel-1; active=1; pending=0; depth=0; has_element=0
         close_at=find_close(line,start)
         if (close_at>0) {
-          values=(mode=="sent") ? "\"0x5200\", \"0x5203\"" : "\"0x5201\", \"0x5202\", \"0x5204\""
+          values=(mode=="sent") ? quoted(sent_ids) : quoted(recv_ids)
           addition=has_element ? ", " values : values
           line=substr(line,1,close_at-1) addition substr(line,close_at)
           active=0
@@ -210,15 +226,15 @@ awk '
   }
   END { if (sent_done!=1 || recv_done!=1 || active || pending) exit 2 }
 ' "$FILE" > "$TMP" || {
-  echo "V33_RGI_CONFIG=FAIL reason=patch_failed" >&2
+  echo "$TAG=FAIL reason=patch_failed" >&2
   exit 1
 }
 
 verify_complete "$TMP" || {
-  echo "V33_RGI_CONFIG=FAIL reason=post_patch_verify" >&2
+  echo "$TAG=FAIL reason=post_patch_verify" >&2
   exit 1
 }
 chmod 644 "$TMP" || exit 1
 mv "$TMP" "$FILE" || exit 1
 trap - 0 1 2 15
-echo "V33_RGI_CONFIG=PASS state=PATCHED"
+echo "$TAG=PASS state=PATCHED"

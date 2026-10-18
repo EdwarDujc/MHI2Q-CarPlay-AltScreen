@@ -1,8 +1,10 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix6
+# MIB2 Toolbox — CarPlay AltScreen V3.8
 
 [English](README_EN.md) | **简体中文**
 
 本项目面向 Audi **MHI2Q** 平台，用于将 **CarPlay 原生 AltScreen / 第二屏导航画面**直接显示至车辆的 **Virtual Cockpit**。核心显示链路已完成实车验证。操作前请完整阅读本说明。
+
+**V3.8 更新：仪表电话页支持 CarPlay 通话（移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony）；仪表底部信息栏在路名后显示预计到达时间；新增手机转向卡片安装模式；修复首次连接时仪表第二屏不出画面；本项目原创部分改为禁止售卖的非商用许可。**
 
 **V3.7 更新：完整 RGI 导航信息联动上线（基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建）；第二屏颜色转换改由 GPU 完成，整机 CPU 占用率从约 80% 降至约 20%；运行水印已移除；V3.7 起全部以 GPL-3.0 开源。**
 
@@ -16,7 +18,7 @@
 > **免责声明**
 >
 > - 本项目的所有改动都会写入并影响车机系统文件。安装、更新、启动、恢复等操作都会修改原车程序、配置和防火墙规则，可能影响车机的正常运行。
-> - 本项目免费提供，按"现状"发布，不提供任何形式的担保（见 GPL-3.0 第 15、16 条）。
+> - 本项目免费提供，按"现状"发布，不提供任何形式的担保（见 PolyForm Noncommercial 1.0.0 的 No Liability 条款和 GPL-3.0 第 15、16 条）。
 > - **使用本项目即表示你已了解上述风险，并自行承担全部后果。因使用、安装、恢复或修改本项目而出现的任何问题，包括但不限于车机故障、功能异常、无法启动、数据丢失、保修失效以及其他直接或间接损失，作者及贡献者均不承担任何责任。**
 > - 如不同意以上条款，请不要安装或使用本项目。
 
@@ -62,7 +64,7 @@
 >
 > 考虑到此前免费测试成果曾被未经允许包装和倒卖，本项目早期版本只公开了运行包，并分阶段发布功能。**自 V3.7 起，本项目全部开源**：全部功能与源码均已在本仓库公开。
 >
-> 本项目整体采用 **[GNU GPL v3.0](LICENSE)** 许可：任何人都可以使用、修改和再分发；再分发二进制或修改版时，必须以 GPL-3.0 同时提供完整源码。详见文末「许可、作者与第三方文件」。
+> **自 V3.8 起，本项目原创部分禁止售卖。** 第二屏 hook、显示进程、安装脚本、绿色菜单和说明文档改为 **PolyForm Noncommercial 1.0.0 + [附加条款](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md)**：个人可以免费使用、研究、修改和免费转发；不得出售或收费分发；收费帮人安装的，每台车每次的费用总额不得超过人民币 100 元。基于 Luka / Allemon 的 Java HMI 与 RGI 部分继续按 GPL-3.0 发布。详见文末「许可、作者与第三方文件」。
 >
 > 当前版本并非演示代码，现有 CarPlay AltScreen 第二屏功能已经可以正常实车使用。
 >
@@ -70,7 +72,7 @@
 >
 > **免费分享。** 本项目的源码和安装包都可以在 GitHub 上免费获取，请不要花钱购买。
 >
-> 欢迎学习、研究和交流。如果有人向你提供本项目或其修改版，你有权按 GPL-3.0 向对方索取完整源码。
+> 欢迎学习、研究和交流。如果有人向你出售本项目，或帮你安装时收费超过人民币 100 元，请通过 Issue 反馈。
 
 > [!IMPORTANT]
 > 本项目会修改车机系统文件。安装、启动或恢复过程中请保持 SD 卡连接和车机供电稳定。  
@@ -93,11 +95,20 @@
 - 无线 CarPlay：君用 M2Pro 无线盒子（最新内测固件）实测支持第二屏、RGI、滚轮缩放和投屏
 - 完整 RGI 导航信息联动（基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建）
   - 仪表转向箭头与车道引导
-  - 可在安装时选择是否启用（`INSTALL WITH RGI` / `INSTALL NO RGI`）
+  - 可在安装时选择是否启用（`INSTALL WITH RGI` / `INSTALL WITH RGI CARD` 启用；`INSTALL WITH NOTHING` / `INSTALL WITH CARD` 不显示转向箭头）
+- 仪表电话页显示 CarPlay 通话（**移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony**）
+  - 原车连接 CarPlay 时电话页只显示"iPhone 处于 Apple CarPlay 模式"提示，现在像蓝牙电话一样显示来电、拨号、通话、保持状态，以及来电名字、号码和通话计时
+  - 在仪表和方向盘上接听、挂断、保持 / 恢复、两路通话切换、麦克风静音
+  - 最近通话（iPhone 最多提供 12 条）和个人收藏，可直接拨出；未接来电提示、信号格和运营商
+  - 中控按 TEL 键直接进入 CarPlay 电话，跳过"iPhone 处于 Apple CarPlay 模式"弹窗
+  - CarPlay 不向车机提供通讯录和来电头像：仪表"通讯录"显示无电话簿
+  - 所有安装模式都启用；连接蓝牙电话时完全走原车
+- 仪表底部信息栏在路名后显示预计到达时间，例如"中山路 | 14:35"；所有安装模式都有，导航软件已带到达时间时不会重复显示
+- 手机转向卡片（`INSTALL WITH CARD` / `INSTALL WITH RGI CARD`）：iPhone 在仪表地图旁显示转向提示卡片，位置用绿色菜单 `CARD LEFT` / `CARD TOP` / `CARD RIGHT` 选择；目前只有 B9（A4/A5 等）和 Q7 布局的大地图视图显示卡片
 - Classic / Sport 动态布局适配
 - 全域居中
 - 方向盘左侧滚轮缩放
-- 仪表地图显示限速牌和指南针，不叠加 ETA
+- 仪表地图显示限速牌和指南针，地图画面上不叠加 ETA（到达时间显示在底部信息栏）
 - GPU 颜色转换：整机 CPU 占用率从约 80% 降至约 20%
 - 冷启动等待原车仪表地图就绪后再显示第二屏
 - 第二屏固定端口防火墙放行，LTE 换 IP 不断流
@@ -210,8 +221,25 @@ Virtual Cockpit
 
 ### RGI 导航信息链路
 
-- `libcarplay_rgi_meta.so` 在原车 CarPlay 进程中接收 iAP2 RouteGuidance 导航信息，通过本机 TCP 19810 交给 Java HMI。两种安装模式都会加载它并启动这条本机总线：`INSTALL NO RGI` 只关闭导航信息模块，原车地图就绪通知等仍经由这条总线传递。
+- `libcarplay_rgi_meta.so` 在原车 CarPlay 进程中接收 iAP2 RouteGuidance 导航信息，通过本机 TCP 19810 交给 Java HMI。所有安装模式都会加载它并启动这条本机总线，原车地图就绪通知也经由它传递。不带 RGI 的 `INSTALL WITH NOTHING` / `INSTALL WITH CARD` 同样接收导航信息，但只用于底部信息栏的路名和到达时间，不启动转向箭头渲染器。
 - 转向箭头和车道引导通过本机 TCP 19800 发给独立的 `maneuver_render` 进程，由它绘制到 displayable 98；该进程由 `rgi_supervisor.sh` 守护，异常退出后有限次自动重启。
+
+### 底部信息栏：路名与到达时间
+
+导航时，Java HMI 把路名和预计到达时间写入仪表底部信息栏（BAP FctID 19），格式为"路名 | 到达时间"。导航软件发来的文字里已经带了到达时间时只保留一份。`INSTALL WITH RGI` / `WITH RGI CARD` 同时接管转向箭头、距离和剩余时间等导航信息；`INSTALL WITH NOTHING` / `WITH CARD` 只写这一行文字，其余信息保持原车行为。
+
+### 手机转向卡片
+
+`INSTALL WITH CARD` / `WITH RGI CARD` 时，hook 向 iPhone 声明带转向卡片的仪表布局并加宽大地图区域，iPhone 直接在第二屏画面中画出转向卡片。`CARD LEFT` / `CARD TOP` / `CARD RIGHT` 把位置写入车机，hook 每 100 ms 读取一次，CarPlay 连接时在大地图视图中立即生效，不需要重连；重新 INSTALL 后恢复为默认的 TOP。小地图视图和 B9、Q7 以外的布局没有放卡片的空间，只显示地图。
+
+### 仪表电话页链路
+
+本功能移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony（原理见其 `docs/cluster-and-rgi/CARPLAY_TELEPHONY.md`），按本项目的单一 HMI JAR 结构做了适配。
+
+- 原车在 CarPlay 连接期间通过 BAP 告诉仪表"手机处于 Apple CarPlay 模式"，仪表电话页因此只显示提示。Java HMI 包装原车的仪表电话服务：只在原车自己判定 CarPlay 已连接时，改为向仪表报告免提电话，并填入 CarPlay 的通话、列表和信号；CarPlay 断开后重放原车的值。连接蓝牙电话时全部原样交给原车。
+- 通话状态取自原车终端模式事件总线（原车本来就把 DSICarplay 的通话状态转发到这里），拨号也走原车 CarPlay 的 `tel:` 拨号。本项目没有像 Luka 那样整体替换 `CarplayDSILifecycleController`，因为这个类在中国区固件上与 US / EU 不同；这样一个 HMI JAR 即可通用于 US（MU1316）、EU（MU1329）和 CN（MU1003）。
+- `libcarplay_rgi_meta.so` 中的电话模块通过 iAP2 订阅最近通话和个人收藏，只读原车已订阅的信号、运营商和电量信息，并把接听、挂断、切换、保持、静音命令发给 iPhone，与 Java 之间同样走本机 TCP 19810。安装时在 `dio_manager.json` 中登记这 7 个 iAP2 消息号（`0x415B`–`0x415D`、`0x415F`、`0x4160`、`0x4170`、`0x4171`），复原时随原车备份还原。
+- 为此替换了三个原车类：`ServiceManagerPhone`、电话与系统状态机的 `Activator`。它们在三版固件中逐字节相同；如果本项目的电话类无法加载，会自动退回原车对象，不影响原车电话和整个 HMI 启动。
 
 ### 方向盘滚轮缩放
 
@@ -227,9 +255,9 @@ V3.7 起全部源码都在本仓库中：
 |---|---|---|
 | `Toolbox/carplay_alt_screen/src/` | 原车 CarPlay 进程的预加载 hook：private111 第二屏接入、画面读取、viewArea、滚轮缩放 | `universal/libcarplay_altscreen.so` |
 | `Toolbox/carplay_alt_screen/mirror_display/` | 第二屏显示进程（C++ / GLES / displayable3），GPU 完成颜色转换，内嵌开屏 Logo | `mirror_display/release/carplay-alt111-mirror-display` |
-| `Toolbox/carplay_alt_screen/rgi_native/` | RGI 预加载 hook：iAP2 RouteGuidance 解析与转发、原车地图就绪通知转发 | `rgi_meta/libcarplay_rgi_meta.so` |
+| `Toolbox/carplay_alt_screen/rgi_native/` | RGI 预加载 hook：iAP2 RouteGuidance 解析与转发、原车地图就绪通知转发；`telephony/` 为仪表电话页的 iAP2 模块（移植自 Luka 的 mib2q-carplay-rgi） | `rgi_meta/libcarplay_rgi_meta.so` |
 | `Toolbox/carplay_alt_screen/rgi_renderer/` | 转向箭头 / 车道引导渲染器 | `rgi_renderer/release/maneuver_render` |
-| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook：Context80、仪表图层、RGI 分发、滚轮事件、原车地图启动等待；`stubs/` 为编译用原车接口桩，`vendor/` 为基线 JAR | `hmi/carplay_hook-basevideo3.jar` |
+| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook：Context80、仪表图层、RGI 分发、滚轮事件、原车地图启动等待；`src/com/luka/carplay/telephony/` 与 `src/de/audi/` 下替换的原车类为仪表电话页（移植自 Luka 的 mib2q-carplay-rgi）；`stubs/` 为编译用原车接口桩，`vendor/` 为基线 JAR，其中不由 `src/` 编译的类的源码放在 `vendor/src/`，逐个类的说明见 `vendor/SOURCES.md` | `hmi/carplay_hook-basevideo3.jar` |
 | `Toolbox/scripts/`、`Toolbox/GEM/` | 安装 / 启动 / 状态 / 恢复 / 诊断脚本与绿色菜单 | 随 SD 卡使用 |
 | `Tools/`、`BUILD-*.sh` | 构建与校验工具 | — |
 
@@ -312,7 +340,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.7 Fix6`**），菜单中只有 `INSTALL NO RGI`、`INSTALL WITH RGI` 和 `RESTORE ORIGINAL` 三项。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
+   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.8`**），菜单中有 4 个安装选项（`INSTALL WITH NOTHING`、`INSTALL WITH RGI`、`INSTALL WITH CARD`、`INSTALL WITH RGI CARD`）、3 个卡片位置选项（`CARD LEFT`、`CARD TOP`、`CARD RIGHT`）和 `RESTORE ORIGINAL`。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
 
 5. 如果此时仍提示：
 
@@ -329,8 +357,12 @@ Script not found:
 
 1. **断开 iPhone / CarPlay**，避免安装过程中正在输出导航视频。
 2. 在 `MMI-Cockpit-Carplay` 菜单中选择一种安装模式：
-   - `INSTALL WITH RGI`（推荐）：第二屏地图 + 完整 RGI（转向箭头、车道引导）。
-   - `INSTALL NO RGI`：只显示第二屏地图，不启用 RGI 相关组件；适合只需要地图或排查 RGI 问题时使用。
+   - `INSTALL WITH RGI`（推荐）：第二屏地图 + 完整 RGI（转向箭头、车道引导）+ 底部信息栏的路名和到达时间。
+   - `INSTALL WITH RGI CARD`：在 `INSTALL WITH RGI` 的基础上，再显示 iPhone 的转向卡片。
+   - `INSTALL WITH CARD`：第二屏地图 + iPhone 转向卡片 + 底部信息栏的路名和到达时间，不显示转向箭头。
+   - `INSTALL WITH NOTHING`：第二屏地图 + 底部信息栏的路名和到达时间，不显示转向箭头和卡片；适合只需要地图或排查 RGI 问题时使用。
+
+   转向卡片目前只在 B9（A4/A5 等）和 Q7 布局的大地图视图显示。位置用 `CARD LEFT` / `CARD TOP` / `CARD RIGHT` 选择，默认 TOP，CarPlay 连接时立即生效；重新 INSTALL 后恢复为 TOP。
 3. 等待屏幕最后出现 `RESULT:` 结论，期间不要拔卡、断电或重启。安装程序会依次执行 5 步，每一步都会实时显示进度：
 
    ```text
@@ -344,7 +376,9 @@ Script not found:
 4. 看到 `RESULT: SUCCESS` 后，**完整重启车机一次**，然后连接 iPhone、进入 CarPlay 并启动导航，观察 Virtual Cockpit 是否出现第二屏画面且能随导航更新。冷启动时第二屏要等原车仪表地图加载完成后才会出现，这是正常的。
 5. 如果显示 `RESULT: FAILED`，结论下方会写明失败在哪一步、车机当前处于什么状态（未改动 / 已回滚 / 已恢复原车）以及下一步该怎么做，按提示操作即可。完整过程记录在 `Log:` 所示的 SD 卡日志中。
 
-安装模式记录在 SD 卡安装日志（`MMI-Cockpit-Carplay/logs/operations/install_*.log`）的 `INSTALL_RGI_MODE=WITH / NO` 中。要切换模式，直接用另一种模式重新执行 INSTALL 即可，安装程序会先自动卸载当前版本。
+安装模式记录在 SD 卡安装日志（`MMI-Cockpit-Carplay/logs/operations/install_*.log`）的 `INSTALL_RGI_MODE=WITH / NO` 和 `INSTALL_CARD_MODE=WITH / NO` 中。要切换模式，直接用另一种模式重新执行 INSTALL 即可，安装程序会先自动卸载当前版本。
+
+仪表电话页和底部信息栏的到达时间在所有安装模式下都会启用；从旧版本升级后需要重新执行一次 INSTALL 并完整重启，才会写入它们需要的 iAP2 消息号。
 
 > [!NOTE]
 > 第二屏启动时会先播放约 5 秒的开屏视频（铺满仪表），然后切换到 CarPlay 画面，属于正常现象。它不是整车开机 Logo。
@@ -363,6 +397,7 @@ Script not found:
 - 安装后，每次开机的运行日志会自动保存到 SD 卡的 `MMI-Cockpit-Carplay/logs/boots/boot_*/` 目录（开机时需插着 SD 卡），包括 private111 建连与断开、H.264、Screen 读取、decoded SHM、显示帧率、displayable3、Context80、viewArea 与布局状态、防火墙规则和网络状态，以及原车系统日志。
 - 安装、复原等操作的日志保存在 SD 卡的 `MMI-Cockpit-Carplay/logs/operations/` 目录。
 - 车机上运行中的日志位于 `/tmp/`，例如 `/tmp/altscreen_hook.log`、RGI 渲染器的 `/tmp/maneuver_render.log`。
+- 仪表电话页的日志：Java 侧在 `carplay_hook.log`（`TELEPHONY_BRIDGE`、`TELEPHONY_GATE`、`TELEPHONY_LISTS`、`TELEPHONY_ACTION`、`TELEPHONY_POPUP_SKIP`），iAP2 侧在 `carplay_rgi_native.log`（`TELEPHONY_READY`、`TELEPHONY_LISTS_REQUESTED`、`TELEPHONY_CMD`）。两者都会随开机日志保存到 SD 卡的 `streams/` 目录。
 - 出现问题时请先保存完整日志，再修改配置或代码。反馈问题时请附上 SD 卡上整个 `MMI-Cockpit-Carplay/logs/` 目录，并说明固件版本与地区、Classic / Sport 和 FULL / SMALL 布局，以及连接方式（先插手机再启动车机 / 车机完全启动后再插手机 / 快速重连）。
 
 ### 7. 恢复原车
@@ -392,7 +427,7 @@ Script not found:
 
 1. 断开 iPhone / CarPlay，插入保留了 `MMI-Cockpit-Carplay` 原车备份目录的 SD 卡（即当初安装用的卡）。
 2. 按第 2 节把新版覆盖包合并到这张 SD 卡，删除旧版遗留的 `logo.rgba` 和 `watermark.rgba`；卡上的 `MMI-Cockpit-Carplay` 目录必须完整保留。
-3. 按第 3 节执行 `Update Toolbox`，再按第 4 节执行 `INSTALL WITH RGI` 或 `INSTALL NO RGI`。安装程序检测到旧版本后，会先自动执行完整的复原并校验，然后再安装新版。
+3. 按第 3 节执行 `Update Toolbox`，再按第 4 节选择一种安装模式执行 INSTALL。安装程序检测到旧版本后，会先自动执行完整的复原并校验，然后再安装新版。
 4. 看到 `RESULT: SUCCESS` 后完整重启车机一次。
 
 如果卡上没有原车备份（例如换了 SD 卡），安装程序会在第 2 步停止并提示，不会改动车机。
@@ -403,29 +438,37 @@ Script not found:
 
 ## 参与维护
 
-**V3.7 全部开源，欢迎各位一起维护、修复问题和增添新功能。**
+**本项目源码全部公开，欢迎各位一起维护、修复问题和增添新功能。**
 
 - 通过 Issue 反馈问题，请附上完整日志、固件版本与地区、布局和连接方式；日常交流可加入 QQ 群 **823297190** 或 [Telegram 群](https://t.me/+xZ2pabi2nmk1MDI9)。
 - 通过 Pull Request 提交修复和新功能，构建方法见上方「源码结构与构建」；也欢迎补充 US / ER 等其他地区固件的实车测试结果，帮助扩大已验证范围。
 - 提交 PR 时请说明测试车型、固件版本、测试步骤和结果。
 - 每次只改动一层：不要在一次修改中同时引入新的解码器、新的 Context 或大范围显示结构调整，否则出现异常后很难定位是哪一层造成的。
 - 上车测试请覆盖冷启动（先插手机再启动车机 / 车机完全启动后再插手机 / 快速重连）以及 Classic / Sport、FULL / SMALL 四种布局，并确认 `RESTORE ORIGINAL` 仍能正常恢复。
-- 提交的代码将随本项目以 GPL-3.0 发布。
+- 提交的代码按所改部分的许可发布：改动 `src/`、`mirror_display/`、脚本、绿色菜单或文档的，按 PolyForm Noncommercial 1.0.0 + 附加条款发布；改动 `hmi/`、`rgi_native/`、`rgi_renderer/` 的，按 GPL-3.0 发布。提交 PR 即表示你同意以上述许可授权你提交的代码。
 
 ---
 
 ## 许可、作者与第三方文件
 
-本项目由 [yuedizhibo](https://github.com/yuedizhibo) 和 [Lanye-z](https://github.com/Lanye-z) 共同开发。**V3.7 全部开源**：本仓库公开全部 C/C++ 源码、运行二进制、安装脚本和说明，整个项目采用 **[GNU General Public License v3.0](LICENSE)**（GPL-3.0）发布。
-
-GPL-3.0 允许任何人使用、研究、修改和再分发本项目，包括商业用途；再分发二进制或修改版时，必须以 GPL-3.0 同时提供完整对应源码，并保留原有版权与许可声明。
+本项目由 [yuedizhibo](https://github.com/yuedizhibo) 和 [Lanye-z](https://github.com/Lanye-z) 共同开发。本仓库公开全部 C/C++ 源码、运行二进制、安装脚本和说明。V3.7 至 V3.7Fix6 按 GPL-3.0 发布；**自 V3.8 起，各部分的许可如下表**（总览见 [LICENSE](LICENSE)，逐个目录的说明见 [NOTICE.md](Toolbox/carplay_alt_screen/NOTICE.md)）。
 
 | 部分 | 来源 | 许可 |
 |---|---|---|
-| 第二屏显示链路（`src/`、`mirror_display/`）、安装 / 恢复 / 诊断脚本、绿色菜单、说明文档等 | 本项目原创 | GPL-3.0 |
-| Java HMI 与完整 RGI（`hmi/`、`rgi_native/`、`rgi_renderer/`） | 基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建；渲染器合并自 [Allemon/mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen) | GPL-3.0 |
-| 上游 MIB2 Toolbox 相关文件 | [jilleb/mib2-toolbox](https://github.com/jilleb/mib2-toolbox) | [MIT](LICENSE.TOOLBOX-MIT)，与 GPL-3.0 兼容 |
-| 镜像运行组件 | [Lanye-z 的 MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [Unlicense](Toolbox/carplay_alt_screen/mirror_display/release/LICENSE.MMI-MIRROR)，与 GPL-3.0 兼容 |
+| 第二屏 hook（`src/`）、第二屏显示进程（`mirror_display/`）、安装 / 恢复 / 诊断脚本、绿色菜单、说明文档等 | 本项目原创；显示后端最初取自 [Lanye-z 的 MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [PolyForm Noncommercial 1.0.0](Toolbox/carplay_alt_screen/LICENSE.POLYFORM-NONCOMMERCIAL-1.0.0.md) + [附加条款](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md) |
+| Java HMI 与完整 RGI（`hmi/`、`rgi_native/`、`rgi_renderer/`），包括本项目在其中新增和修改的代码 | 基于 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 构建；渲染器合并自 [Allemon/mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen) | [GPL-3.0](Toolbox/carplay_alt_screen/LICENSE.GPL-3.0.txt) |
+| 仪表电话页（`hmi/src/com/luka/carplay/telephony/`、`hmi/src/de/audi/` 下替换的原车类、`rgi_native/src/telephony/`） | 移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)（CarPlay Telephony）；本项目改为经原车事件总线取得通话状态，并加入加载失败时退回原车对象的保护 | [GPL-3.0](Toolbox/carplay_alt_screen/LICENSE.GPL-3.0.txt) |
+| 上游 MIB2 Toolbox 相关文件 | [jilleb/mib2-toolbox](https://github.com/jilleb/mib2-toolbox) | [MIT](LICENSE.TOOLBOX-MIT) |
+| MMI Mirror 原始代码 | [Lanye-z 的 MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [Unlicense](Toolbox/carplay_alt_screen/mirror_display/release/LICENSE.MMI-MIRROR) |
+
+**本项目原创部分的使用规则**（以[附加条款](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md)原文为准）：
+
+- 个人可以免费使用、研究、修改，也可以免费转发，但必须保留作者署名和许可声明。
+- **禁止售卖**：不得出售本软件、安装包或修改版，不得以付费下载、积分、会员、激活码等方式收费分发，也不得把本软件作为卖点抬高硬件或其他商品的价格。
+- **允许收费安装，但有上限**：帮他人车辆安装时，每台车每次收取的费用总额不得超过人民币 100 元，其他币种按收费当时的汇率折算；总额包括人工、上门、远程协助、SD 卡等全部费用。安装时必须使用 GitHub 发布的原版安装包，并告知车主本软件免费及其来源。
+- 如需上述范围以外的商业使用，请联系作者另行取得书面授权。
+
+GPL-3.0 部分仍允许任何人按 GPL-3.0 使用、修改和再分发；再分发时必须同时提供完整对应源码，并保留原有版权与许可声明。第二屏 hook 和显示进程是独立程序，不包含也不链接 GPL-3.0 部分的代码，安装包只是把它们放在一起分发。
 
 源码中随附的其他第三方文件（如 `stb_image.h`、Unicode 数据文件）保留各自原有许可，第三方文件的原有授权声明须一并保留。
 
@@ -437,7 +480,7 @@ GPL-3.0 允许任何人使用、研究、修改和再分发本项目，包括商
 
 ~~~text
 main
-└── AUG22 / V3.7Fix6
+└── AUG22 / V3.8
     ├── 中国区（CN）固件：实车测试可用
     ├── 欧洲区（ER）部分固件：用户实车反馈可用（P5092 / P5152，MU 1329）
     └── 其他地区固件：可能存在未知 BUG，不保证 100% 可用
@@ -446,6 +489,16 @@ main
 当前公开版本以稳定、可安装、可恢复为优先目标。
 
 ### 更新记录
+
+**V3.8**
+
+- 仪表电话页支持 CarPlay 通话（移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony）：像连接蓝牙电话一样显示来电、拨号、通话中和保持状态，以及来电名字、号码和通话时长；可以在仪表和方向盘上接听、挂断、保持或恢复、切换两路通话、静音；显示最近通话和个人收藏并可直接拨出，显示未接来电提示、信号和运营商；中控按 TEL 键直接进入 CarPlay 电话，不再弹出"iPhone 处于 Apple CarPlay 模式"。连接蓝牙电话时保持原车功能不变；暂不支持通讯录和来电头像（CarPlay 不向车机提供这些信息）。
+- 导航时仪表底部信息栏在路名后显示预计到达时间，例如"中山路 | 14:35"。所有安装模式都支持，导航软件已带到达时间时不会重复显示。
+- 新增手机转向卡片：安装时选 `INSTALL WITH CARD` 或 `INSTALL WITH RGI CARD`，仪表地图旁会显示 iPhone 的转向提示卡片，位置用绿色菜单 `CARD LEFT` / `CARD TOP` / `CARD RIGHT` 选择。目前只有 B9（A4/A5 等）和 Q7 布局的大地图视图显示卡片，小地图视图和其他布局只显示地图。
+- 修复首次连接 CarPlay 时仪表不出画面、要重新插拔才显示的问题。
+- `INSTALL NO RGI` 改名为 `INSTALL WITH NOTHING`，该模式现在也在底部信息栏显示路名和到达时间，但不显示转向箭头。绿色菜单改为 4 个安装选项、3 个卡片位置选项和 `RESTORE ORIGINAL`，版本标识更新为 `V3.8`。
+- 许可变更：本项目原创部分改为 PolyForm Noncommercial 1.0.0 + 附加条款，禁止售卖；可以收费帮人安装，但每台车每次的费用总额不超过人民币 100 元。基于 Luka / Allemon 的部分继续按 GPL-3.0 发布。
+- 从旧版本升级后，需要重新执行一次 INSTALL 并完整重启车机，电话页和底部到达时间才会生效。
 
 **V3.7Fix6**
 
@@ -511,9 +564,9 @@ main
 
 ## 公开发布说明
 
-自 V3.7 起，本项目全部开源：全部功能、源码、可安装运行包与相关说明均已公开，并统一以 GPL-3.0 发布。
+自 V3.7 起，本项目的全部功能、源码、可安装运行包与相关说明均已公开。V3.7 至 V3.7Fix6 按 GPL-3.0 发布；自 V3.8 起，本项目原创部分按 PolyForm Noncommercial 1.0.0 + 附加条款发布，禁止售卖，基于 Luka / Allemon 的部分继续按 GPL-3.0 发布，详见「许可、作者与第三方文件」。
 
-> **免费分享：本项目在 GitHub 上免费提供，请勿花钱购买。**
+> **免费分享：本项目在 GitHub 上免费提供，请勿花钱购买。收费帮人安装的，每台车每次不得超过人民币 100 元。**
 
 ---
 
@@ -521,7 +574,7 @@ main
 
 感谢以下项目和作者，本项目在他们的工作基础上完成：
 
-- [Luka](https://github.com/luka-dev) 的 [mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)：完整 RGI 导航信息联动与 Java HMI 的构建基础，以及 MHI2Q 的 CarPlay 导航引导、HMI 与仪表交互参考。
+- [Luka](https://github.com/luka-dev) 的 [mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)：完整 RGI 导航信息联动与 Java HMI 的构建基础，仪表电话页（CarPlay Telephony）的来源，以及 MHI2Q 的 CarPlay 导航引导、HMI 与仪表交互参考。
 - [Allemon](https://github.com/Allemon) 的 [mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen)：RGI 转向箭头渲染器的上游实现。
 - [LIVI](https://github.com/f-io/LIVI)：CarPlay 主屏与仪表第二屏协议行为的研究参考。
 - [jilleb](https://github.com/jilleb) 的 [MIB2 High Toolbox](https://github.com/jilleb/mib2-toolbox)：SD 卡工具链、工程菜单及脚本的上游项目。

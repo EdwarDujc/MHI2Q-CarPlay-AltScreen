@@ -43,11 +43,12 @@ SUPERVISOR_LOG="$DEVICE_ROOT/tmp/altscreen_stream_supervisor.log"
 EXPECTED_SIZE=$(sed -n 's/^jar_size=//p' "$RUNTIME/state/hmi-build-info.txt" 2>/dev/null || true)
 EXPECTED_CKSUM=$(sed -n 's/^jar_cksum=//p' "$RUNTIME/state/hmi-build-info.txt" 2>/dev/null || true)
 if [ -f "$RUNTIME/state/rgi.disabled" ]; then echo "INSTALL_RGI_MODE=NO"; else echo "INSTALL_RGI_MODE=WITH"; fi
+if [ -f "$RUNTIME/state/card.enabled" ]; then echo "INSTALL_CARD_MODE=WITH card_layout=$(cat "$RUNTIME/state/cluster-card-layout.txt" 2>/dev/null || echo top)"; else echo "INSTALL_CARD_MODE=NO"; fi
 
 file_size(){ n=$(wc -c < "$1" 2>/dev/null) || { echo 0; return; }; set -- $n; echo "${1:-0}"; }
 file_cksum(){ if command -v cksum >/dev/null 2>&1; then cksum < "$1" 2>/dev/null | awk '{print $1}'; else echo unavailable; fi; }
 
-echo "=== CarPlay private111 Direct Display V3.5 ==="
+echo "=== CarPlay private111 Direct Display V3.8 ==="
 echo "PRIVATE111_NEGOTIATION_POLICY=V35_EARLY_PROTOCOL_READY sd_runtime_gate=DISABLED geometry_gate=ASYNC"
 echo "DISPLAY_START_POLICY=STREAM_DRIVEN stable_decoded_frames=2 fixed_delay=NONE"
 echo "V3_CONTROL_PLANE=changeMapZoomLevel wheel_zoom=enabled display_baseline=V2_UNCHANGED"

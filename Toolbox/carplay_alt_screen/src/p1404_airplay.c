@@ -22,8 +22,6 @@ extern int altscreen_runtime_wait_ready(unsigned timeout_ms)
 #define ALTSCREEN_NEGOTIATION_WAIT_MS 500u
 #define ALT111_BOOTSTRAP_WIDTH 1440u
 #define ALT111_BOOTSTRAP_HEIGHT 542u
-#define ALT111_PANEL_WIDTH_PX 1440u
-#define ALT111_PANEL_WIDTH_MM 292u
 
 static volatile uint32_t g_alt_advertised_width;
 static volatile uint32_t g_alt_advertised_height;
@@ -535,6 +533,75 @@ static int alt_load_hmi_layout(char *view, size_t view_cap,
     return have_view && have_layout;
 }
 
+/*
+ * Phone maneuver card (INSTALL WITH CARD / INSTALL WITH RGI CARD), ported from
+ * the Logo tree. The installer leaves state/card.enabled; the green-menu CARD
+ * LEFT/TOP/RIGHT entries write state/cluster-card-layout.txt (default top).
+ * Only the FULL view of a known B9/Q7 layout has room for the card; SMALL and
+ * unknown layouts keep the map-only context.
+ */
+#define ALT_CARD_STATE_DIR "/mnt/app/root/carplay-altscreen/state/"
+static int alt_phone_card_profile(void) {
+    FILE *f = fopen(ALT_CARD_STATE_DIR "card.enabled", "r");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int alt_phone_card_position(void) {
+    char mode[16];
+    FILE *f = fopen(ALT_CARD_STATE_DIR "cluster-card-layout.txt", "r");
+    mode[0] = 0;
+    if (f) {
+        if (!fgets(mode, sizeof(mode), f)) mode[0] = 0;
+        fclose(f);
+    }
+    alt_trim_line(mode);
+    if (!strcmp(mode, "left")) return 1;
+    if (!strcmp(mode, "right")) return 3;
+    return 2; /* top, and the default */
+}
+
+int alt_phone_card_mode(void) {
+    char view[16], layout[128];
+    int dx, dy;
+    if (!alt_phone_card_profile()) return 0;
+    if (!alt_load_hmi_layout(view, sizeof(view), layout, sizeof(layout), &dx, &dy))
+        return 0;
+    if (strcmp(view, "FULL") ||
+        (!strstr(layout, "LayoutMIB2HighB9") && !strstr(layout, "LayoutMIB2HighQ7")))
+        return 0;
+    return alt_phone_card_position();
+}
+
+/*
+ * Safe-area geometry (x/w only; every view keeps y=72,h=378, bottom=450).
+ * Card profiles use the Logo-tree layout: one wider FULL area shared by
+ * Classic and Sport (300..1140), and one SMALL area (470..970) that Classic
+ * shows in place while Sport pans it by -445 to center it in the sport slot.
+ * Every other profile keeps the V3.5 OEM-measured rectangles.
+ */
+#define ALT_LOGO_SPORT_SMALL_DX (-445)
+struct alt_layout_rects { uint32_t full_x, full_w, small_x, small_w; int card; };
+static struct alt_layout_rects alt_layout_rects(void) {
+    struct alt_layout_rects r;
+    if (alt_phone_card_profile()) {
+        r.full_x = 300u; r.full_w = 840u; r.small_x = 470u; r.small_w = 500u; r.card = 1;
+    } else {
+        r.full_x = 370u; r.full_w = 700u; r.small_x = 490u; r.small_w = 460u; r.card = 0;
+    }
+    return r;
+}
+
+static const char *alt_cluster_url_for_card(int card_mode, const char **layout_name) {
+    switch (card_mode) {
+    case 1: *layout_name = "card-left"; return CP_ALT_CLUSTER_CARD_URL_LEFT;
+    case 2: *layout_name = "card-top"; return CP_ALT_CLUSTER_CARD_URL_TOP;
+    case 3: *layout_name = "card-right"; return CP_ALT_CLUSTER_CARD_URL_RIGHT;
+    default: *layout_name = "map-only"; return CP_ALT_CLUSTER_MAP_URL;
+    }
+}
+
 static int alt_is_measured_b9_canvas(uint32_t display_w,
                                      uint32_t display_h) {
     /*
@@ -574,6 +641,7 @@ static int alt_load_measured_k1004_safe_area(uint32_t display_w,
                                              int small_dy,
                                              struct alt_safe_rect *out) {
     struct alt_safe_rect r;
+    struct alt_layout_rects g = alt_layout_rects();
     int64_t physical_x, physical_y;
     if (!view || !layout || !out) return 0;
     if (!alt_is_measured_b9_canvas(display_w, display_h)) return 0;
@@ -590,20 +658,23 @@ static int alt_load_measured_k1004_safe_area(uint32_t display_w,
      * not be cancelled here.
      */
     if (!strcmp(view, "SMALL")) {
-        r.x = 490u;
+        r.x = g.small_x;
         r.y = 72u;
-        r.w = 460u;
+        r.w = g.small_w;
         r.h = 378u;
-        r.physical_w = 460u;
+        r.physical_w = g.small_w;
         r.physical_h = 378u;
-        r.renderer_dx = small_dx;
+        /* Card profile: B9 Sport centers the shared SMALL area (-445), the
+         * mirror display applies the same pan. */
+        r.renderer_dx = g.card && strstr(layout, "LayoutMIB2HighB9Sport") ?
+            ALT_LOGO_SPORT_SMALL_DX : small_dx;
         r.renderer_dy = small_dy;
     } else if (!strcmp(view, "FULL")) {
-        r.x = 370u;
+        r.x = g.full_x;
         r.y = 72u;
-        r.w = 700u;
+        r.w = g.full_w;
         r.h = 378u;
-        r.physical_w = 700u;
+        r.physical_w = g.full_w;
         r.physical_h = 378u;
         r.renderer_dx = 0;
         r.renderer_dy = 0;
@@ -618,8 +689,7 @@ static int alt_load_measured_k1004_safe_area(uint32_t display_w,
      * renderer translation is still applied afterwards (Sport SMALL contributes
      * -476 on X and normally 0 on Y).
      */
-    physical_x = (int64_t)(!strcmp(view, "SMALL") ? 490u : 370u) +
-                 (int64_t)r.renderer_dx;
+    physical_x = (int64_t)r.x + (int64_t)r.renderer_dx;
     physical_y = 72 + (int64_t)r.renderer_dy;
     if (physical_x < -8192 || physical_x > 8192 ||
         physical_y < -8192 || physical_y > 8192) {
@@ -632,7 +702,8 @@ static int alt_load_measured_k1004_safe_area(uint32_t display_w,
     r.view[sizeof(r.view) - 1u] = 0;
     strncpy(r.layout, layout, sizeof(r.layout) - 1u);
     r.layout[sizeof(r.layout) - 1u] = 0;
-    strncpy(r.source, "k1004-oem-x-vertical-72-450-v35", sizeof(r.source) - 1u);
+    strncpy(r.source, g.card ? "logo-card-safe-72-450" : "k1004-oem-x-vertical-72-450-v35",
+            sizeof(r.source) - 1u);
     r.source[sizeof(r.source) - 1u] = 0;
     *out = r;
     return 1;
@@ -663,13 +734,14 @@ static void alt_resolve_cluster_safe_area(uint32_t display_w,
      * same-session FULL<->SMALL switching impossible later.
      */
     if (alt_is_measured_b9_canvas(display_w, display_h)) {
-        out->x = 370u;
+        struct alt_layout_rects g = alt_layout_rects();
+        out->x = g.full_x;
         out->y = 72u;
-        out->w = 700u;
+        out->w = g.full_w;
         out->h = 378u;
-        out->physical_x = 370;
+        out->physical_x = (int)g.full_x;
         out->physical_y = 75;
-        out->physical_w = 700u;
+        out->physical_w = g.full_w;
         out->physical_h = 378u;
         strncpy(out->source, "k1004-default-v35-72-450-before-hmi",
                 sizeof(out->source) - 1u);
@@ -735,15 +807,17 @@ static cf_obj make_view_areas(uint32_t w, uint32_t h) {
  * keeps the runtime coded canvas (observed 1440x542 on the private111 path);
  * only the nested safeArea changes. The displayable3 sink remains 1440x455.
  *
- * index 0 = FULL  (370,72,700x378)
- * index 1 = SMALL (490,72,460x378)
+ * index 0 = FULL  (370,72,700x378)   card profile: (300,72,840x378)
+ * index 1 = SMALL (490,72,460x378)   card profile: (470,72,500x378)
  *
  * V3.5 preserves the V3.1/V3.2 horizontal OEM constraints while using the
- * vehicle-tuned vertical safe region top=72, bottom=450.
+ * vehicle-tuned vertical safe region top=72, bottom=450. Card profiles use the
+ * Logo-tree layout (see alt_layout_rects).
  */
 static cf_obj make_cluster_layout_view_areas(uint32_t w, uint32_t h,
                                              int enable_two_areas) {
     struct alt_safe_rect full, small;
+    struct alt_layout_rects g = alt_layout_rects();
     cf_obj areas = NULL, v = NULL, safe = NULL;
 
     if (!cf_array_create_mutable || !cf_array_append || !cf_dict_set)
@@ -753,9 +827,9 @@ static cf_obj make_cluster_layout_view_areas(uint32_t w, uint32_t h,
     if (!areas) return NULL;
 
     memset(&full, 0, sizeof(full));
-    full.x = 370u;
+    full.x = g.full_x;
     full.y = 72u;
-    full.w = 700u;
+    full.w = g.full_w;
     full.h = 378u;
     if (!full.h || !alt_safe_rect_valid(&full, w, h)) goto fail;
 
@@ -769,9 +843,9 @@ static cf_obj make_cluster_layout_view_areas(uint32_t w, uint32_t h,
     if (!enable_two_areas) return areas;
 
     memset(&small, 0, sizeof(small));
-    small.x = 490u;
+    small.x = g.small_x;
     small.y = 72u;
-    small.w = 460u;
+    small.w = g.small_w;
     small.h = 378u;
     if (!small.h || !alt_safe_rect_valid(&small, w, h)) goto fail;
 
@@ -857,18 +931,8 @@ void *alt_build_cluster_display(void) {
     altscreen_log("PHASE=ALT111_INFO_GEOMETRY_CONTRACT advertised=%ux%u provisional=%d live_geometry=%d renderer_must_match=1",
                   d->width_pixels, d->height_pixels, geometry_provisional,
                   geometry_provisional ? 0 : 1);
-    /*
-     * Screen publishes no panel size, so report the MHI2Q virtual cockpit
-     * itself: a 12.3-inch 1440x540 TFT, 292.5 x 109.7 mm (0.203 mm pitch),
-     * onto which the type-111 canvas maps 1:1. The former LIVI 200 mm default
-     * claimed 183 ppi instead of 125 ppi, so iOS scaled third-party cluster
-     * UI (Amap) up by about 1.46x.
-     */
-    physical_width = d->width_mm ? d->width_mm :
-        alt_div_u32(d->width_pixels * ALT111_PANEL_WIDTH_MM +
-                        (ALT111_PANEL_WIDTH_PX >> 1),
-                    ALT111_PANEL_WIDTH_PX);
-    if (!physical_width) physical_width = 1u;
+    /* Match LIVI getInfo.displayEntry when physical panel size is unavailable. */
+    physical_width = d->width_mm ? d->width_mm : 200u;
     physical_height = d->height_mm;
     if (!physical_height) {
         uint32_t scaled = physical_width * d->height_pixels;
@@ -876,10 +940,6 @@ void *alt_build_cluster_display(void) {
                                       d->width_pixels);
         if (!physical_height) physical_height = 1u;
     }
-    altscreen_log("PHASE=ALT111_PHYSICAL_SIZE mm=%ux%u pixels=%ux%u source=%s",
-                  physical_width, physical_height,
-                  d->width_pixels, d->height_pixels,
-                  d->width_mm ? "SCREEN" : "MHI2Q_VC_12.3IN_1440x540");
     if (!cf_dict_create_mutable || !cf_str_new || !cf_num_new || !cf_dict_set || !cf_release)
         return NULL;
     dict = cf_dict_create_mutable(NULL, 0, NULL, NULL, NULL);
@@ -966,6 +1026,12 @@ void *alt_build_cluster_display(void) {
         cluster_safe.renderer_dx, cluster_safe.renderer_dy,
         cluster_safe.view, cluster_safe.layout,
         cluster_safe.source);
+    {
+        struct alt_layout_rects g = alt_layout_rects();
+        altscreen_log("ALTAREA_CARD_LAYOUT profile=%s full=%u,72,%ux378 small=%u,72,%ux378 sport_small_pan=%s",
+                      g.card ? "CARD_LOGO" : "DEFAULT_V35", g.full_x, g.full_w,
+                      g.small_x, g.small_w, g.card ? "-445" : "OEM_STAGE_DX");
+    }
     altscreen_log("ALTINFO built type=%u %ux%u@%u uuid=%s features=0x%x input=%d fields=%u",
                   d->stream_type, d->width_pixels, d->height_pixels, d->max_fps,
                   d->uuid, DISPLAY_FEATURE_KNOBS | DISPLAY_FEATURE_HIGH_FIDELITY_TOUCH,
@@ -1026,6 +1092,7 @@ static void alt111_event_response(int status, void *response, void *opaque) {
         else
             p1404_cockpit_native_event_result(ctx->receiver, ctx->stream,
                                           ctx->generation, ctx->event_kind,
+                                          ctx->event_seq, ctx->event_value,
                                           status, response != NULL);
     }
 #ifdef ALT111_TRACKED_BOOTSTRAP
@@ -1063,13 +1130,15 @@ static int guarded_command_submit(airplay_send_command_fn submit,
     return rc;
 }
 
+/* card_mode: showUI only; -1 = resolve the current phone-card mode now. */
 static int alt_send_cluster_event_impl(void *receiver, void *stream,
                            uint32_t generation, int event_kind, int bootstrap,
-                           uint32_t event_seq) {
+                           uint32_t event_seq, int card_mode) {
     airplay_send_command_fn send_command;
     struct alt111_event_context *ctx = NULL;
     const struct altscreen_display *display = altscreen_cluster_display();
     const char *type_name;
+    const char *map_url = NULL, *layout_name = "-";
     cf_obj command = NULL, params = NULL, type = NULL, uuid = NULL, url = NULL;
     int rc = -1;
 
@@ -1098,7 +1167,9 @@ static int alt_send_cluster_event_impl(void *receiver, void *stream,
     if (!cf_dict_set_cstr_obj(command, "type", type) ||
         !cf_dict_set_cstr_obj(params, "uuid", uuid)) goto done;
     if (event_kind == ALT111_EVENT_SHOW_UI) {
-        url = cf_str_new(CP_ALT_CLUSTER_MAP_URL, -1);
+        if (card_mode < 0) card_mode = alt_phone_card_mode();
+        map_url = alt_cluster_url_for_card(card_mode, &layout_name);
+        url = cf_str_new(map_url, -1);
         if (!url || !cf_dict_set_cstr_obj(params, "url", url)) goto done;
     }
     if (!cf_dict_set_cstr_obj(command, "params", params)) goto done;
@@ -1108,7 +1179,7 @@ static int alt_send_cluster_event_impl(void *receiver, void *stream,
     ctx->stream = stream;
     ctx->generation = generation;
     ctx->event_kind = event_kind;
-    ctx->event_value = -1;
+    ctx->event_value = event_kind == ALT111_EVENT_SHOW_UI ? card_mode : -1;
     ctx->event_seq = event_seq;
     ctx->refs = 2; /* submit path plus callback path */
     if (bootstrap || event_kind == ALT111_EVENT_STOP_UI) {
@@ -1117,9 +1188,9 @@ static int alt_send_cluster_event_impl(void *receiver, void *stream,
     } else if (!p1404_cockpit_native_command_acquire(receiver, stream, generation)) goto done;
     rc = guarded_command_submit(send_command, receiver, command, ctx);
     alt_airplay_release_object(receiver);
-    altscreen_log("PHASE=ALT111_EVENT_SUBMIT receiver=%p stream=%p generation=%u event=%s uuid=%s url=%s rc=%d response_callback=1",
+    altscreen_log("PHASE=ALT111_EVENT_SUBMIT receiver=%p stream=%p generation=%u event=%s uuid=%s layout=%s url=%s rc=%d response_callback=1",
                   receiver, stream, generation, type_name, display->uuid,
-                  event_kind == ALT111_EVENT_SHOW_UI ? CP_ALT_CLUSTER_MAP_URL : "-", rc);
+                  layout_name, map_url ? map_url : "-", rc);
     if (rc == 0) {
         alt111_event_context_release(ctx); /* callback owns the remaining ref */
         ctx = NULL;
@@ -1143,7 +1214,16 @@ done:
 
 int alt_send_cluster_event(void *receiver, void *stream, uint32_t generation,
                            int event_kind) {
-    return alt_send_cluster_event_impl(receiver, stream, generation, event_kind, 0, 0);
+    return alt_send_cluster_event_impl(receiver, stream, generation, event_kind, 0, 0, -1);
+}
+
+/* Native showUI with the card mode the monitor targeted; request_seq fences a
+ * late ACK of an older card refresh. */
+int alt_send_cluster_card_ui(void *receiver, void *stream, uint32_t generation,
+                             uint32_t request_seq, int card_mode) {
+    if (!request_seq) return -1;
+    return alt_send_cluster_event_impl(receiver, stream, generation,
+        ALT111_EVENT_SHOW_UI, 0, request_seq, card_mode);
 }
 
 
@@ -1151,7 +1231,7 @@ int alt_send_cluster_recovery(void *receiver, void *stream,
                                uint32_t generation, uint32_t event_seq) {
     if (!event_seq) return -1;
     return alt_send_cluster_event_impl(receiver, stream, generation,
-        ALT111_EVENT_RECOVERY_KEYFRAME, 0, event_seq);
+        ALT111_EVENT_RECOVERY_KEYFRAME, 0, event_seq, -1);
 }
 
 int alt_send_cluster_view_area(void *receiver, void *stream,
@@ -1314,11 +1394,11 @@ done:
  * must not publish renderer/visibility success from its callback. */
 static int alt_request_cluster_after_main_tracked(void *receiver, uint32_t seq) {
     int show_rc = alt_send_cluster_event_impl(receiver, NULL, 0,
-                                             ALT111_EVENT_SHOW_UI, 1, seq);
+                                             ALT111_EVENT_SHOW_UI, 1, seq, -1);
     int key_rc = -1;
     if (show_rc == 0)
         key_rc = alt_send_cluster_event_impl(receiver, NULL, 0,
-                                             ALT111_EVENT_FORCE_KEYFRAME, 1, seq);
+                                             ALT111_EVENT_FORCE_KEYFRAME, 1, seq, -1);
     altscreen_log("PHASE=ALT111_REQUEST_AFTER_MAIN receiver=%p show_rc=%d keyframe_rc=%d private_stream_required=0",
                   receiver, show_rc, key_rc);
     return show_rc ? show_rc : key_rc;

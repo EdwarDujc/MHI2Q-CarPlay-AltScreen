@@ -240,15 +240,21 @@ void p1404_cockpit_native_recovery_result(void *receiver, void *stream,
     uint32_t generation, uint32_t event_seq, int status, int response_received);
 int alt_send_cluster_event(void *receiver, void *stream, uint32_t generation,
                            int event_kind);
+int alt_send_cluster_card_ui(void *receiver, void *stream, uint32_t generation,
+                             uint32_t request_seq, int card_mode);
 int alt_send_cluster_view_area(void *receiver, void *stream,
                                uint32_t generation, uint32_t event_seq,
                                int view_area_index);
 int alt_send_cluster_zoom(void *receiver, void *stream,
                           uint32_t generation, uint32_t event_seq,
                           int direction);
+/* request_seq/card_mode: native showUI only (0/-1 for other events). */
 void p1404_cockpit_native_event_result(void *receiver, void *stream,
                                         uint32_t generation, int event_kind,
+                                        uint32_t request_seq, int card_mode,
                                         int status, int response_received);
+/* suggestUI offer: bit 1 base, 2 /map, 4 instructioncard. */
+void p1404_cockpit_native_suggest_ui(void *receiver, unsigned offered_mask);
 void p1404_cockpit_native_view_area_result(void *receiver, void *stream,
                                             uint32_t generation,
                                             uint32_t event_seq,

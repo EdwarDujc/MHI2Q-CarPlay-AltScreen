@@ -18,6 +18,19 @@
  */
 #define CP_ALT_CLUSTER_MAP_URL \
     "maps:/car/instrumentcluster/map?showSpeedLimit=user&showCompass=user&showETA=no&maneuverLayout="
+/*
+ * Phone maneuver card (INSTALL WITH CARD / INSTALL WITH RGI CARD, ported from
+ * the Logo tree). The base cluster context lets the navigation app compose its
+ * own maneuver card into the same type111 video; /map is map-only on some
+ * providers. maneuverLayout places the card. leftaligned is accepted by the
+ * phone but its on-screen result is still unconfirmed in a vehicle.
+ */
+#define CP_ALT_CLUSTER_CARD_URL_LEFT \
+    "maps:/car/instrumentcluster?showSpeedLimit=user&showCompass=user&showETA=no&maneuverLayout=leftaligned"
+#define CP_ALT_CLUSTER_CARD_URL_TOP \
+    "maps:/car/instrumentcluster?showSpeedLimit=user&showCompass=user&showETA=no&maneuverLayout=topaligned"
+#define CP_ALT_CLUSTER_CARD_URL_RIGHT \
+    "maps:/car/instrumentcluster?showSpeedLimit=user&showCompass=user&showETA=no&maneuverLayout=rightaligned"
 
 struct altscreen_display {
     const char *uuid;

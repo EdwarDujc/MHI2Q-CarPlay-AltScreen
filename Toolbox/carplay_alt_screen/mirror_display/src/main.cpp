@@ -52,11 +52,58 @@ static const char *displayable_state_path() {
                          "/tmp/mmi-altscreen-displayable3.state");
 }
 
+static const char *keyframe_request_path() {
+    return volatile_path("ALT111_KEYFRAME_REQUEST_FILE",
+                         "/tmp/altscreen-private111.keyframe-request");
+}
+
 static unsigned long long now_us() {
     struct timeval tv;
     if (gettimeofday(&tv, 0) != 0) return 0;
     return (unsigned long long)(unsigned long)tv.tv_sec * 1000000ULL +
            (unsigned long long)(unsigned long)tv.tv_usec;
+}
+
+/*
+ * A new consumer needs a keyframe from the phone (LIVI requests one whenever it
+ * creates a player). Decoding stays in dio_manager and this process attaches
+ * seconds after the stream became ready; for a static map the phone may
+ * already be quiet. The hook sends forceKeyFrame for a record matching its own
+ * writer/generation/cookie and caps requests per stream. Flat /tmp: the record
+ * is rewritten in place, and the hook ignores it until the final request=1.
+ */
+static const unsigned kKeyframeRequestsMax = 4u;
+static const unsigned long long kKeyframeRequestRetryUs = 3000000ULL;
+
+static bool request_consumer_keyframe(const Private111DirectSource &source,
+                                      const char *reason) {
+    static unsigned requests = 0;
+    char payload[192];
+    const uint32_t writer = source.writer_pid();
+    const uint32_t generation = source.generation();
+    const uint32_t cookie = source.stream_cookie();
+    /* Unique across display restarts within one stream: the hook dedupes by seq. */
+    const uint32_t seq = (uint32_t)now_us() | 1u;
+    bool ok = false;
+    if (!writer || !generation || requests >= kKeyframeRequestsMax) return false;
+    ++requests;
+    int n = snprintf(payload, sizeof(payload),
+                     "pid=%u\ngeneration=%u\ncookie=0x%08x\nseq=%u\nconsumer=%u\nrequest=1\n",
+                     (unsigned)writer, (unsigned)generation, (unsigned)cookie,
+                     (unsigned)seq, (unsigned)getpid());
+    if (n > 0 && (size_t)n < sizeof(payload)) {
+        FILE *f = fopen(keyframe_request_path(), "w");
+        if (f) {
+            ok = fwrite(payload, 1, (size_t)n, f) == (size_t)n;
+            ok = fclose(f) == 0 && ok;
+        }
+    }
+    fprintf(stderr,
+            "direct111: PHASE=CONSUMER_KEYFRAME_REQUEST seq=%u attempt=%u "
+            "writer_pid=%u generation=%u cookie=0x%08x reason=%s result=%s\n",
+            (unsigned)seq, requests, (unsigned)writer, (unsigned)generation,
+            (unsigned)cookie, reason, ok ? "WRITTEN" : "FAILED");
+    return ok;
 }
 
 /* A clock correction during boot must not stretch a 4.57 second animation. */
@@ -303,7 +350,24 @@ static bool state_kv_int(const char *line, const char *key, int *out) {
  * The OEM terminal-space Y=26 is map-plane placement metadata.  displayable3
  * already represents that map plane, so Y=26 must not be applied again inside
  * this renderer and is not interpreted as a source crop.
+ *
+ * Card profiles (INSTALL WITH CARD / RGI CARD) use the Logo-tree layout: the
+ * hook declares one SMALL safeArea (x=470,w=500) for Classic and Sport, and
+ * Sport pans it by -445 so its center x=720 lands on the sport slot center
+ * x=275. The profile only changes with INSTALL + reboot, so read it once.
  */
+static bool card_layout_profile() {
+    static int cached = -1;
+    if (cached < 0) {
+        FILE *f = fopen("/mnt/app/root/carplay-altscreen/state/card.enabled", "r");
+        cached = f ? 1 : 0;
+        if (f) fclose(f);
+        fprintf(stderr, "direct111: PHASE=CARD_LAYOUT_PROFILE enabled=%d sport_small_dx=%s\n",
+                cached, cached ? "-445" : "OEM_STAGE_DX");
+    }
+    return cached == 1;
+}
+
 static OemMapPlacement load_session_map_placement() {
     OemMapPlacement p;
     memset(&p, 0, sizeof(p));
@@ -349,7 +413,10 @@ static OemMapPlacement load_session_map_placement() {
         return p;
 
     if (strstr(p.layout, "LayoutMIB2HighB9Sport")) {
-        if (!have_dx) small_dx = -476;
+        if (card_layout_profile())
+            small_dx = -445;    /* Logo layout: center the shared SMALL area */
+        else if (!have_dx)
+            small_dx = -476;
         if (!have_dy) small_dy = 0;
     }
 
@@ -749,6 +816,7 @@ int main(int argc, char **argv) {
         if (source.init()) {
             VideoFrame recovery_probe;
             unsigned fresh_frames = 0u;
+            bool keyframe_asked = false;
             source_initialized = true;
 
             /*
@@ -776,6 +844,11 @@ int main(int argc, char **argv) {
                                 retry, fresh_frames);
                         break;
                     }
+                }
+                /* Attached mid-stream: the phone may be quiet already. */
+                if (!keyframe_asked && source.writer_pid()) {
+                    keyframe_asked = true;
+                    (void)request_consumer_keyframe(source, "attach");
                 }
                 usleep(50000);
             }
@@ -813,6 +886,7 @@ int main(int argc, char **argv) {
     uint32_t startup_writer = 0u;
     uint32_t startup_generation = 0u;
     uint32_t startup_cookie = 0u;
+    unsigned long long last_keyframe_request_us = 0ULL;
     fprintf(stderr,
             "direct111: PHASE=PIPELINE_WAIT "
             "waiting=H264_TAP+DECODER_FRESH_PROGRESS "
@@ -846,6 +920,18 @@ int main(int argc, char **argv) {
                         (unsigned)startup_generation,
                         (unsigned)startup_cookie);
                 break;
+            }
+        }
+
+        /* Still short of two fresh frames for a known session: ask, then
+         * re-ask every 3 s (bounded) instead of waiting for a quiet phone. */
+        if (source.writer_pid() && startup_fresh_frames < 2u) {
+            const unsigned long long t = now_us();
+            if (!last_keyframe_request_us ||
+                t - last_keyframe_request_us >= kKeyframeRequestRetryUs) {
+                last_keyframe_request_us = t ? t : 1ULL;
+                (void)request_consumer_keyframe(source,
+                    startup_fresh_frames ? "one_fresh_frame" : "no_fresh_frame");
             }
         }
 

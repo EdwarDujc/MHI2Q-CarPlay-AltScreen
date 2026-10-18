@@ -1,11 +1,11 @@
 ###########################################################################################
-# MMI-Cockpit-Carplay V3.7 Fix6 - CarPlay Private111 Direct Display / Context80
+# MMI-Cockpit-Carplay V3.8 - CarPlay Private111 Direct Display / Context80
 ###########################################################################################
 screen "MMI-Cockpit-Carplay" Customization
 
 keyValue
     value   String sys 0x00000000 0
-    label   "Version: V3.7 Fix6"
+    label   "Version: V3.8"
     poll    0
 
 keyValue
@@ -20,11 +20,31 @@ keyValue
 
 script
    value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/install_mmi_cockpit_carplay_no_rgi.sh"
-   label   "INSTALL NO RGI"
+   label   "INSTALL WITH NOTHING"
 
 script
    value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/install_mmi_cockpit_carplay_with_rgi.sh"
    label   "INSTALL WITH RGI"
+
+script
+   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/install_mmi_cockpit_carplay_with_card.sh"
+   label   "INSTALL WITH CARD"
+
+script
+   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/install_mmi_cockpit_carplay_with_rgi_card.sh"
+   label   "INSTALL WITH RGI CARD"
+
+script
+   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/cluster_card_left.sh"
+   label   "CARD LEFT"
+
+script
+   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/cluster_card_top.sh"
+   label   "CARD TOP"
+
+script
+   value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/cluster_card_right.sh"
+   label   "CARD RIGHT"
 
 script
    value   sys 1 0x0100 "/eso/hmi/engdefs/scripts/mqb/stop_mmi_cockpit_carplay_test.sh"

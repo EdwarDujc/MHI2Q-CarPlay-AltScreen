@@ -80,6 +80,13 @@
 #define EVT_RGD_UPDATE          0x0020  /* text: route_state + all fields    */
 #define EVT_DEVICE_STATE        0x0030  /* reserved                          */
 
+/* Telephony (telephony/tel_hook.c): sticky text, published empty at init and
+ * on every new Identify or disconnect. */
+#define EVT_TEL_LISTS           0x0040  /* r.<i>.a|b|type|ts|occ, f.<i>.a|b  */
+#define EVT_TEL_COMM            0x0041  /* signal registration airplane      */
+                                        /* carrier battery charging; -1 =    */
+                                        /* not reported                      */
+
 /* ============================================================
  * Command types (Java -> Hook)
  *   0x0100 .. 0x01FF : meta / control
@@ -108,6 +115,9 @@
 #define CMD_ALT_RGI             0x0116  /* binary [u8 0=off 1=on] — Java's     */
                                         /* confirmed RGI presentation; hook    */
                                         /* picks the Maps cluster URL (showUI) */
+#define CMD_TEL                 0x0117  /* binary [u8 action][u8 on] — 1 mute,  */
+                                        /* 2 hold, 3 accept, 4 end, 5 swap      */
+                                        /* (iAP2 Communications, tel_hook.c)    */
 #define CMD_OEM_MAP_READY       0x0119  /* binary [u8 1] — OEM MapKombi is     */
                                         /* initialized; AltScreen may now ask  */
                                         /* the phone for the cluster picture   */

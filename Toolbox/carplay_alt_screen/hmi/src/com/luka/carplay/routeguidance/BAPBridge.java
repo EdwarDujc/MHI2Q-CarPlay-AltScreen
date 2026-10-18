@@ -62,6 +62,10 @@ public class BAPBridge {
         new BAPDistanceFormatter(new SilentLogChannel());
 
     private boolean initialized = false;
+    /* NO RGI install (state/rgi.disabled): fixed for this bridge's lifetime. Only the
+     * route-text line (FctID 19/20) is written; no renderer, no RG status/maneuver/lane
+     * data, no rgActive overlay, no KOMO fields, and stock keeps FctID 21/22/46. */
+    private boolean textOnly;
     /* Set only after the complete synchronous BAP start sequence has returned successfully.
      * RouteGuidance combines this with renderer FRAME_READY before exposing context 80. */
     private volatile boolean bapSessionStarted = false;
@@ -438,7 +442,9 @@ public class BAPBridge {
      * Initialization
      * ============================================================ */
 
-    public boolean init(Object naviService) {
+    public boolean init(Object naviService) { return init(naviService, false); }
+
+    public boolean init(Object naviService, boolean lowerBarTextOnly) {
         if (initialized) return true;
 
         try {
@@ -448,9 +454,12 @@ public class BAPBridge {
                 return false;
             }
             this.appConnectorNavi = (CombiBAPServiceNavi) naviService;
+            textOnly = lowerBarTextOnly;
 
             initialized = true;
             Log.i(TAG, "Initialized successfully (AppConnectorNavi only): " + naviService.getClass().getName());
+            Log.i(TAG, "ROUTE_OUTPUT=" + (textOnly ? "LOWER_BAR_TEXT_ONLY" : "LOWER_BAR_AND_RGI")
+                + " lower_bar_eta=ROAD_SUFFIX renderer=" + (textOnly ? "DISABLED" : "ENABLED"));
             return true;
 
         } catch (Exception e) {
@@ -538,6 +547,8 @@ public class BAPBridge {
      * Non-fatal - if this fails, native RG stream won't be blocked.
      */
     private void initClusterAccess() {
+        // Text-only never touches ClusterService state (KOMO, rgActive, gfx).
+        if (textOnly) return;
         try {
             Navigation navi = Navigation.getInstance();
             if (navi == null) {
@@ -698,6 +709,21 @@ public class BAPBridge {
                 lastDistM = 0;
                 lastBarOn = false;
                 lastBar = 0;
+            }
+
+            if (textOnly) {
+                /* Claim only FctID 19/20 while CarPlay guides. Stock navigation,
+                 * its RG stream and FctID 21/22/46 are left untouched. */
+                com.luka.carplay.core.ScreenNavStatusGate.setCurrentPositionInfoBlocked(true, true);
+                bapSessionStarted = true;
+                try {
+                    appConnectorNavi.updateTurnToInfo("", "");
+                    appConnectorNavi.updateCurrentPositionInfo(ROUTE_TEXT_PENDING);
+                } catch (Throwable t) {
+                    Log.w(TAG, "BAP FctID 19/20 text-only startup failed: " + t);
+                }
+                Log.i(TAG, "Started (LOWER_BAR_TEXT_ONLY fct=19 rg_status=UNCHANGED renderer=DISABLED)");
+                return true;
             }
             /* Action blink thread starts/stops with approach zone enter/exit
              * (see update() near approachChanged) — not on session start.
@@ -863,6 +889,19 @@ public class BAPBridge {
             lastTimeRemainingSampleSeconds = -1L;
             lastDistanceToDestinationM = -1;
 
+            if (textOnly) {
+                try {
+                    appConnectorNavi.updateTurnToInfo("", "");
+                    appConnectorNavi.updateCurrentPositionInfo("");
+                } catch (Throwable t) {
+                    Log.w(TAG, "onShutdown: text-only clear threw (continuing): " + t);
+                }
+                // Releasing replays stock's latest FctID 19/20.
+                com.luka.carplay.core.ScreenNavStatusGate.setCurrentPositionInfoBlocked(false);
+                Log.i(TAG, "Shutdown (LOWER_BAR_TEXT_ONLY released)");
+                return;
+            }
+
             /*
              * Guidance stop — full BAP teardown:
              * 1. RGStatus(0) - triggers sync(0) for {17,39,23,18,49}
@@ -927,6 +966,7 @@ public class BAPBridge {
 
     public boolean update(RouteGuidance.State s) {
         if (!initialized || s == null) return false;
+        if (textOnly) return updateLowerBarOnly(s);
         initClusterAccess();
 
         int failureSerial = rendererSendFailureSerial;
@@ -1138,22 +1178,9 @@ public class BAPBridge {
 
             /* 4. All route text lives in CurrentPositionInfo (FctID 19).
              * Phase 0: angle-quoted exit/signpost, else next road, else current road.
-             * Phase 1: compact ETA duration in smallscreen, arrival + duration
-             * in fullscreen. FctID 20 stays empty in both phases. */
-            int routeTextDirty = RouteGuidance.State.DIRTY_CURRENT_ROAD
-                | RouteGuidance.State.DIRTY_MANEUVER_TEXT
-                | RouteGuidance.State.DIRTY_MANEUVER_LIST
-                | RouteGuidance.State.DIRTY_MANEUVER_ICON
-                | RouteGuidance.State.DIRTY_MANEUVER_COUNT;
-            if (infoPhase != 0) {
-                routeTextDirty |= RouteGuidance.State.DIRTY_DIST_DEST
-                    | RouteGuidance.State.DIRTY_TIME_REMAINING
-                    | RouteGuidance.State.DIRTY_ETA;
-            }
-            if (!routeTextPublished || (dirty & routeTextDirty) != 0) {
-                updateLatchedRouteText(s);
-                publishRouteTextForMode();
-            }
+             * Phase 1: compact remaining duration. Both phases end in " | arrival".
+             * FctID 20 stays empty in both phases. */
+            publishRouteInfoText(s, dirty);
 
             /*
              * 5. Maneuver state (FctID 55) - for HUD
@@ -1284,8 +1311,41 @@ public class BAPBridge {
      *  - the current TCP peer acknowledged at least one eglSwapBuffers frame.
      */
     public boolean isPresentationReady() {
+        if (textOnly) return bapSessionStarted;
         RendererServer r = rendererClient;
         return bapSessionStarted && customRendererStarted && r != null && r.isFrameReady();
+    }
+
+    public boolean isTextOnly() { return textOnly; }
+
+    /** Text-only update: FctID 19 only; FctID 21/22 would re-enable the destination block. */
+    private boolean updateLowerBarOnly(RouteGuidance.State s) {
+        int dirty = s.dirtyMask;
+        cacheTravelInfo(s, dirty);
+        if (dirty == 0) return false;
+        try {
+            publishRouteInfoText(s, dirty);
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "lower-bar update error", t);
+            return false;
+        }
+    }
+
+    /* The arrival suffix depends on ETA/remaining time in every phase. */
+    private void publishRouteInfoText(RouteGuidance.State s, int dirty) {
+        int routeTextDirty = RouteGuidance.State.DIRTY_CURRENT_ROAD
+            | RouteGuidance.State.DIRTY_MANEUVER_TEXT
+            | RouteGuidance.State.DIRTY_MANEUVER_LIST
+            | RouteGuidance.State.DIRTY_MANEUVER_ICON
+            | RouteGuidance.State.DIRTY_MANEUVER_COUNT
+            | RouteGuidance.State.DIRTY_TIME_REMAINING
+            | RouteGuidance.State.DIRTY_ETA;
+        if (infoPhase != 0) routeTextDirty |= RouteGuidance.State.DIRTY_DIST_DEST;
+        if (!routeTextPublished || (dirty & routeTextDirty) != 0) {
+            updateLatchedRouteText(s);
+            publishRouteTextForMode();
+        }
     }
 
     /**
@@ -1301,7 +1361,7 @@ public class BAPBridge {
             cacheTravelInfo(s, s.dirtyMask);
             updateLatchedRouteText(s);
             publishRouteTextForMode();
-            publishTimeToDestinationForMode();
+            if (!textOnly) publishTimeToDestinationForMode();
             Log.i(TAG, "route-info phase=" + infoPhase + " applied view="
                 + (com.luka.carplay.core.ScreenModule.isSmallScreenViewArea() ? "smallscreen" : "fullscreen"));
             return true;
@@ -1351,6 +1411,7 @@ public class BAPBridge {
     private void publishRouteTextForMode() {
         boolean smallScreen = com.luka.carplay.core.ScreenModule.isSmallScreenViewArea();
         String text = infoPhase == 0 ? "" : (smallScreen ? buildShortSummary() : buildTripSummary());
+        long arrivalSeconds = currentArrivalSeconds();
         String before = "", after = "";
         if (text.length() == 0) {
             text = latchedPositionText;
@@ -1361,6 +1422,14 @@ public class BAPBridge {
             text = text.substring(before.length());
         }
         if (text.length() == 0) text = ROUTE_TEXT_PENDING;
+        boolean suppliedArrival = containsArrivalClock(text);
+        text = normalizeEtaLabel(text);
+        if (!suppliedArrival && arrivalSeconds >= 0L) {
+            String clock = formatArrivalForText(arrivalSeconds);
+            // Keep the ETA visible on every scrolling fragment; the planner reserves
+            // both its pixel width and UTF-8 bytes before fitting the road text.
+            after += " | " + clock.substring(ROUTE_TIME_PREFIX.length());
+        }
         boolean changed = positionScroll.configure(text, before, after, positionRestart);
         positionScrollChanged |= changed;
         positionRestart = false;
@@ -1382,6 +1451,73 @@ public class BAPBridge {
         positionScroll.sent(System.currentTimeMillis());
         positionSendFailed = false;
         routeTextPublished = true;
+    }
+
+    /** Recognise a supplied arrival clock, not a road name containing 'ETA'. */
+    private static boolean containsArrivalClock(String text) {
+        String[] labels = {"ETA", "到达时间", "预计到达", "预计抵达", "|"};
+        String upper = text.toUpperCase();
+        for (int label = 0; label < labels.length; label++) {
+            int start = 0, at;
+            while ((at = upper.indexOf(labels[label], start)) >= 0) {
+                start = at + labels[label].length();
+                if (label == 0 && at > 0) {
+                    char prev = upper.charAt(at - 1);
+                    if (prev >= 'A' && prev <= 'Z') continue;
+                }
+                if (arrivalClockStart(upper, start) >= 0) return true;
+            }
+        }
+        return false;
+    }
+
+    private static int arrivalClockStart(String text, int pos) {
+        while (pos < text.length() && (text.charAt(pos) == ' '
+                || text.charAt(pos) == ':' || text.charAt(pos) == '：')) pos++;
+        int clock = pos, hour = 0, count = 0;
+        while (pos < text.length() && count < 2 && text.charAt(pos) >= '0'
+                && text.charAt(pos) <= '9') {
+            hour = hour * 10 + text.charAt(pos++) - '0';
+            count++;
+        }
+        if (count == 0 || hour > 23 || pos + 2 >= text.length()) return -1;
+        char colon = text.charAt(pos++), m1 = text.charAt(pos++), m2 = text.charAt(pos++);
+        return (colon == ':' || colon == '：') && m1 >= '0' && m1 <= '5'
+            && m2 >= '0' && m2 <= '9'
+            && (pos == text.length() || text.charAt(pos) < '0' || text.charAt(pos) > '9')
+            ? clock : -1;
+    }
+
+    /** Compact supplied arrival labels, preserving the phone's actual clock. */
+    private static String normalizeEtaLabel(String text) {
+        String[] labels = {"预计到达时间", "预计抵达时间",
+            "到达时间", "预计到达", "预计抵达", "ETA"};
+        StringBuffer result = null;
+        int from = 0;
+        for (int i = 0; i < text.length(); i++) {
+            int label = -1;
+            for (int k = 0; k < labels.length; k++) {
+                if (text.regionMatches(true, i, labels[k], 0, labels[k].length())) { label = k; break; }
+            }
+            if (label < 0) continue;
+            if (label == labels.length - 1 && i > 0) {
+                char prev = text.charAt(i - 1);
+                if ((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z')) continue;
+            }
+            int clock = arrivalClockStart(text, i + labels[label].length());
+            if (clock < 0) continue;
+            if (result == null) result = new StringBuffer();
+            int end = i;
+            while (end > from && text.charAt(end - 1) == ' ') end--;
+            if (end > from && text.charAt(end - 1) == '|') {
+                end--;
+                while (end > from && text.charAt(end - 1) == ' ') end--;
+            }
+            result.append(text.substring(from, end)).append(end > from ? " | " : "| ");
+            from = clock;
+            i = clock - 1;
+        }
+        return result == null ? text : result.append(text.substring(from)).toString();
     }
 
     private void clearPositionScroll() {
@@ -1429,17 +1565,15 @@ public class BAPBridge {
         }
     }
 
+    /* The arrival clock is already the suffix of every route-text frame. */
     private String buildTripSummary() {
-        String arrival = formatArrivalForText(currentArrivalSeconds());
-        String remaining = formatRemainingForText(currentRemainingSeconds());
-        if (arrival.length() == 0) return remaining;
-        return remaining.length() == 0 ? arrival : arrival + " | " + remaining;
+        return buildShortSummary();
     }
 
     private String buildShortSummary() {
         String remaining = formatRemainingForText(currentRemainingSeconds());
         if (remaining.length() > 0) return ROUTE_TIME_PREFIX + remaining;
-        return formatArrivalForText(currentArrivalSeconds());
+        return "";
     }
 
     private void cacheTravelInfo(RouteGuidance.State s, int dirty) {
@@ -1540,7 +1674,7 @@ public class BAPBridge {
 
     /** Advance the renderer handshake without waiting. Called by the presentation worker. */
     public boolean preparePresentation() {
-        startCustomRenderer();
+        if (!textOnly) startCustomRenderer();
         return isPresentationReady();
     }
 

@@ -97,6 +97,15 @@ static int alt111_recovery_submit_failed(struct alt111_stream_recovery *s, uint3
     return 1;
 }
 
+/* The first cluster ownership of a stream starts the presented-picture budget
+ * afresh. Probes spent while the display was still waiting for its first
+ * frames must not leave the visible session without recovery. The backoff
+ * timestamp and any in-flight fence are kept. */
+static void alt111_recovery_rearm(struct alt111_stream_recovery *s) {
+    s->attempts = 0;
+    s->exhausted_logged = 0;
+}
+
 static int alt111_recovery_result(struct alt111_stream_recovery *s, uint32_t seq) {
     if (!seq || s->inflight_seq != seq) return 0;
     s->inflight_seq = 0;

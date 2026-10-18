@@ -534,11 +534,12 @@ fi
 system_space_snapshot start_after_publish
 
 rm -f "$DEVICE_ROOT/tmp/mmi-rgi.stopped" "$DEVICE_ROOT/tmp/altscreen_mirror.stop.requested" 2>/dev/null || fail "cannot reset display lifecycle"
+# /tmp/mmi-rgi.disabled is RESTORE's runtime withdrawal. NO RGI is the persistent
+# state/rgi.disabled: renderer off, road + ETA kept in the stock lower bar.
+rm -f "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot reset RGI lifecycle"
 if [ -f "$STATE/rgi.disabled" ]; then
-    printf '' > "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot disable RGI lifecycle"
-    echo "INSTALL_RGI_MODE=NO"
+    echo "INSTALL_RGI_MODE=NO lower_bar=ROAD_ETA_TEXT_ONLY"
 else
-    rm -f "$DEVICE_ROOT/tmp/mmi-rgi.disabled" || fail "cannot enable RGI lifecycle"
     echo "INSTALL_RGI_MODE=WITH"
 fi
 stage CURRENT_BOOT_DISPLAY_RESET

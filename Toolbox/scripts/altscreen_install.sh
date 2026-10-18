@@ -3,7 +3,8 @@ ALTS_RESCUE_DISABLED=1; ALTS_RESCUE_RESTORE=0
 export ALTS_RESCUE_DISABLED ALTS_RESCUE_RESTORE
 PATH=${PATH:+$PATH:}/proc/boot:/armle/bin:/armle/scripts:/bin:/usr/bin:/usr/sbin:/sbin:/mnt/app/armle/bin:/mnt/app/armle/sbin:/mnt/app/armle/usr/bin:/mnt/app/armle/usr/sbin:/eso/bin:/eso/bin/apps
 export PATH
-# MMI-Cockpit-Carplay one-step INSTALL (GEM: INSTALL WITH RGI / INSTALL NO RGI).
+# MMI-Cockpit-Carplay one-step INSTALL (GEM: INSTALL WITH NOTHING / RGI / CARD /
+# RGI CARD; ALTS_INSTALL_RGI_MODE and ALTS_INSTALL_CARD_MODE are NO|WITH).
 #
 #   1. check the package and firmware
 #   2. remove any previous installation (transactional RESTORE ORIGINAL)
@@ -17,12 +18,15 @@ export PATH
 set -u
 
 ALTS_INSTALL_RGI_MODE=${ALTS_INSTALL_RGI_MODE:-WITH}
-case "$ALTS_INSTALL_RGI_MODE" in
-    WITH) MODE_TEXT="AltScreen + RGI" ;;
-    NO)   MODE_TEXT="AltScreen only (no RGI)" ;;
-    *)    echo "RESULT: FAILED - invalid install mode '$ALTS_INSTALL_RGI_MODE'"; exit 2 ;;
+ALTS_INSTALL_CARD_MODE=${ALTS_INSTALL_CARD_MODE:-NO}
+case "$ALTS_INSTALL_RGI_MODE/$ALTS_INSTALL_CARD_MODE" in
+    WITH/NO)   MODE_TEXT="AltScreen + RGI" ;;
+    NO/NO)     MODE_TEXT="AltScreen only (no RGI, no card)" ;;
+    NO/WITH)   MODE_TEXT="AltScreen + phone card" ;;
+    WITH/WITH) MODE_TEXT="AltScreen + RGI + phone card" ;;
+    *)    echo "RESULT: FAILED - invalid install mode '$ALTS_INSTALL_RGI_MODE/$ALTS_INSTALL_CARD_MODE'"; exit 2 ;;
 esac
-export ALTS_INSTALL_RGI_MODE
+export ALTS_INSTALL_RGI_MODE ALTS_INSTALL_CARD_MODE
 
 TESTING=${ALTSCREEN_CHAIN_TESTING:-0}
 ROOT=""
@@ -68,7 +72,7 @@ if [ -f "$SD_RW_HELPER" ]; then
     altscreen_sd_ensure_writable "$VOLUME" INSTALL_JOURNAL >/dev/null 2>&1 && SD_OK=1
 fi
 alts_ui_open_log "$VOLUME" install "$ROOT/tmp" || true
-alts_ui_log "INSTALL_MODE=$ALTS_INSTALL_RGI_MODE volume=$VOLUME testing=$TESTING"
+alts_ui_log "INSTALL_MODE=$ALTS_INSTALL_RGI_MODE INSTALL_CARD_MODE=$ALTS_INSTALL_CARD_MODE volume=$VOLUME testing=$TESTING"
 
 SD="$VOLUME/MMI-Cockpit-Carplay"
 STEP_TOTAL=5
@@ -354,12 +358,19 @@ if [ -z "$problem" ]; then
         grep -q 'libcarplay_rgi_meta.so' "$SI" 2>/dev/null || problem="cover art preload missing in NO RGI mode"
         [ -n "$problem" ] || [ -f "$RUNTIME/state/rgi.disabled" ] || problem="RGI not disabled"
     fi
+    if [ -z "$problem" ]; then
+        if [ "$ALTS_INSTALL_CARD_MODE" = WITH ]; then
+            [ -f "$RUNTIME/state/card.enabled" ] || problem="phone card not enabled"
+        else
+            [ ! -e "$RUNTIME/state/card.enabled" ] || problem="phone card unexpectedly enabled"
+        fi
+    fi
 fi
 if [ -n "$problem" ]; then
     alts_ui_log "FINAL_VERIFY=FAIL reason=$problem"
     fail_and_restore "Final check failed: $problem."
 fi
-alts_ui_log "FINAL_VERIFY=PASS mode=$ALTS_INSTALL_RGI_MODE"
+alts_ui_log "FINAL_VERIFY=PASS mode=$ALTS_INSTALL_RGI_MODE card=$ALTS_INSTALL_CARD_MODE"
 ok
 
 trap - 1 2 15

@@ -23,6 +23,9 @@ void p1404_airplay_load_flags(void);
  * the display start wait; capabilities and Main110 are not delayed. */
 int alt_oem_map_startup_ready(void);
 void altscreen_oem_map_ready(int ready);
+/* Phone maneuver card (INSTALL WITH CARD): 0 = map only, 1/2/3 = card
+ * left/top/right. Only the FULL view of a known B9/Q7 layout shows the card. */
+int alt_phone_card_mode(void);
 int alt_request_cluster_after_main(void *receiver);
 void *alt_build_cluster_display(void);
 void *alt_info_add_cluster_display(void *container);

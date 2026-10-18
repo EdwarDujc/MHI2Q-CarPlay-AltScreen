@@ -9,7 +9,9 @@ set -u
 
 ALTS_INSTALL_RGI_MODE=${ALTS_INSTALL_RGI_MODE:-WITH}
 case "$ALTS_INSTALL_RGI_MODE" in NO|WITH) ;; *) echo "INSTALL=REFUSED reason=INVALID_RGI_MODE" >&2; exit 2 ;; esac
-export ALTS_INSTALL_RGI_MODE
+ALTS_INSTALL_CARD_MODE=${ALTS_INSTALL_CARD_MODE:-NO}
+case "$ALTS_INSTALL_CARD_MODE" in NO|WITH) ;; *) echo "INSTALL=REFUSED reason=INVALID_CARD_MODE" >&2; exit 2 ;; esac
+export ALTS_INSTALL_RGI_MODE ALTS_INSTALL_CARD_MODE
 
 # QNX compatibility: treat already-existing directories as success instead of
 # relying on target mkdir -p return semantics.
@@ -207,7 +209,7 @@ echo "PIXEL_TARGET=displayable3"
 echo "HMI_CONTEXT=ctx80"
 echo "WINDOW58_READBACK=DISABLED"
 echo "DIRECT_DISPLAY_SIDECAR=INCLUDED"
-echo "INSTALL_RGI_MODE=$ALTS_INSTALL_RGI_MODE reboot_required=YES"
+echo "INSTALL_RGI_MODE=$ALTS_INSTALL_RGI_MODE INSTALL_CARD_MODE=$ALTS_INSTALL_CARD_MODE reboot_required=YES"
 
 echo "HMI_JAR_POLICY=PROJECT_OWNED install=CREATE_OR_REPLACE uninstall=DELETE permanent_oem_backup=NO rollback=INSTALL_TRANSACTION_SNAPSHOT"
 

@@ -468,8 +468,18 @@ verify_config_context() (
         fi
     fi
     if ! same_bytes "$dio" "$(p "$LIVE_JSON_DIO")"; then
-        cp "$dio" "$TXN_DIR/identity.dio" && /bin/sh "$RGI_CONFIG" apply "$TXN_DIR/identity.dio" >/dev/null || return 1
-        same_bytes "$TXN_DIR/identity.dio" "$(p "$LIVE_JSON_DIO")" || {
+        # The project edits are deterministic appends: telephony (every mode),
+        # RGI (installs before telephony), or both in either order (a NO install
+        # followed by a WITH install appends RGI after telephony).
+        dio_live="$(p "$LIVE_JSON_DIO")"; dio_match=0
+        for dio_sets in telephony rgi "rgi telephony" "telephony rgi"; do
+            cp "$dio" "$TXN_DIR/identity.dio" || return 1
+            for dio_set in $dio_sets; do
+                /bin/sh "$RGI_CONFIG" apply "$TXN_DIR/identity.dio" "$dio_set" >/dev/null || return 1
+            done
+            same_bytes "$TXN_DIR/identity.dio" "$dio_live" && { dio_match=1; break; }
+        done
+        [ "$dio_match" = 1 ] || {
             say "BACKUP_IDENTITY=REFUSED reason=DIO_CONFIG_MISMATCH production_changed=NO"; return 1;
         }
     fi
@@ -538,7 +548,7 @@ verify_snapshot_context() (
 )
 pristine_precheck() (
     if grep -Eq 'libcarplay_(altscreen|rgi_meta|hook)[^" :]*[.]so|libcp_mirror[.]so|libairplax[.]so|/root/lib-target/|/root/carplay-altscreen/' "$(p "$LIVE_JSON_SI")" 2>/dev/null ||
-       grep -Eq '"0x520[0-4]"' "$(p "$LIVE_JSON_DIO")" 2>/dev/null ||
+       grep -Eq '"0x520[0-4]"|"0x417[01]"' "$(p "$LIVE_JSON_DIO")" 2>/dev/null ||
        grep -Eq 'ALTSCREEN|ALT111|carplay0.*(49152|65535)' "$(p "$LIVE_PF_CONF")" 2>/dev/null ||
        [ -e "$(p /mnt/app/eso/hmi/lsd/jars/carplay_hook.jar)" ]; then
         say "FAIL: trusted original backup unavailable; project/legacy configuration remains; use the original SD backup or restore stock first"
@@ -933,8 +943,9 @@ cmd_install(){
         cfg_rgi="$TXN_DIR/rgi-preload-config"
         cfg="$TXN_DIR/universal-config"
         rgi_preload="$RGI_META_REL"
-        # The shared native library also receives song cover art. NO disables
-        # only the routeguidance module via the persistent rgi.disabled policy.
+        # The shared native library also receives song cover art. NO keeps the
+        # routeguidance module for the lower-bar route text (road + ETA); the
+        # persistent rgi.disabled policy disables only the maneuver renderer.
         awk -v hook="$rgi_preload" -v exclude2="$RGI_META_REL" -v allow_absent=1 \
             -v exclude=/mnt/app/root/hooks/libcarplay_hook.so \
             -v insert_if_absent=1 -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" > "$cfg_rgi" || goto_fail=1
@@ -949,15 +960,22 @@ cmd_install(){
         fi
         rm -f "$cfg_rgi" "$cfg"
     fi
-    if [ "${goto_fail:-0}" != 1 ] && [ "$rgi_mode" = WITH ]; then
+    # RGI message IDs in every install mode: NO still shows road + ETA in the
+    # stock lower bar.
+    if [ "${goto_fail:-0}" != 1 ]; then
         /bin/sh "$RGI_CONFIG" apply "$(p "$LIVE_JSON_DIO")" || goto_fail=1
+    fi
+    # Cluster telephone tab (every install mode): the iAP2 Communications IDs the
+    # shared native library sends and receives.  verify_config_context rebuilds
+    # either order of the two sets from the original backup.
+    if [ "${goto_fail:-0}" != 1 ]; then
+        /bin/sh "$RGI_CONFIG" apply "$(p "$LIVE_JSON_DIO")" telephony || goto_fail=1
     fi
     if [ "${goto_fail:-0}" != 1 ]; then
         awk -v query="$UNIVERSAL_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || goto_fail=1
         awk -v query="$RGI_META_REL" -f "$PRELOAD_AWK" "$(p "$LIVE_JSON_SI")" >/dev/null || goto_fail=1
-        if [ "$rgi_mode" = WITH ]; then
-            /bin/sh "$RGI_CONFIG" verify "$(p "$LIVE_JSON_DIO")" >/dev/null || goto_fail=1
-        fi
+        /bin/sh "$RGI_CONFIG" verify "$(p "$LIVE_JSON_DIO")" >/dev/null || goto_fail=1
+        /bin/sh "$RGI_CONFIG" verify "$(p "$LIVE_JSON_DIO")" telephony >/dev/null || goto_fail=1
     fi
     if [ "${goto_fail:-0}" != 1 ]; then install_static_firewall_rule || goto_fail=1; fi
     if [ "${goto_fail:-0}" = 1 ]; then
@@ -977,7 +995,7 @@ cmd_install(){
     cleanup_txn
     say "FIRMWARE_PROFILE=UNIVERSAL source=aug22_unified_policy stock_reuse=YES"
     say "UNIVERSAL_PRELOAD=INSTALLED path=$UNIVERSAL_REL resolver=ELF_DYNAMIC_RELOCATION"
-    say "INSTALL_RGI_MODE=$rgi_mode native_preload=$rgi_preload reboot_required=YES"
+    say "INSTALL_RGI_MODE=$rgi_mode INSTALL_CARD_MODE=${ALTS_INSTALL_CARD_MODE:-NO} native_preload=$rgi_preload reboot_required=YES"
     lock_release || return 1
     say "INSTALL=PASS reboot_required=YES"
 }

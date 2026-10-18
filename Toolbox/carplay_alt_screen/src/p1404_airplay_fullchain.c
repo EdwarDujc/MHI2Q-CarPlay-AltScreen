@@ -39,6 +39,40 @@ static session_start_fn real_session_start;
 #define TEARDOWN_FULL (TEARDOWN_MAIN | TEARDOWN_ALT)
 #define ALTSCREEN_K_NOT_HANDLED_ERR (-6714)
 
+/* Record the phone's UI offer without copying unbounded provider URLs to the
+ * log (Logo tree). The card profile requests the composited base context; this
+ * tells whether iOS offered an instruction card at all. */
+static int fullchain_log_suggest_ui(const void *params) {
+    cf_obj urls;
+    unsigned i, count, card = 0, map = 0, base = 0, other = 0;
+    char scratch[192];
+    if (!params || !alt_cf_is_dict((cf_obj)params) || !cf_dict_get ||
+        !cf_array_count || !cf_array_at) {
+        altscreen_log("PHASE=SUGGEST_UI_OFFER schema=unknown");
+        return -1;
+    }
+    urls = cf_dict_get_cstr((cf_obj)params, "urls");
+    if (!urls || !alt_cf_is_array(urls)) {
+        altscreen_log("PHASE=SUGGEST_UI_OFFER schema=urls_absent_or_invalid");
+        return -1;
+    }
+    count = cf_array_count(urls);
+    for (i = 0; i < count && i < 16u; ++i) {
+        cf_obj item = (cf_obj)cf_array_at(urls, i);
+        const char *url;
+        if (item && alt_cf_is_dict(item)) item = cf_dict_get_cstr(item, "url");
+        url = alt_cf_cString(item, scratch, sizeof(scratch));
+        if (!url) { ++other; continue; }
+        if (!strncmp(url, "maps:/car/instrumentcluster/instructioncard", 43)) ++card;
+        else if (!strncmp(url, "maps:/car/instrumentcluster/map", 31)) ++map;
+        else if (!strncmp(url, "maps:/car/instrumentcluster", 27)) ++base;
+        else ++other;
+    }
+    altscreen_log("PHASE=SUGGEST_UI_OFFER count=%u inspected=%u base=%u map=%u instructioncard=%u other=%u",
+                  count, count < 16u ? count : 16u, base, map, card, other);
+    return (base ? 1 : 0) | (map ? 2 : 0) | (card ? 4 : 0);
+}
+
 /* Stock TearDown uses an absent/empty/non-array streams value for full cleanup
  * (K1004 0x26ae8..0x26b18); a nonempty array is a per-stream operation. Main110
  * cleanup does not destroy receiver+0x13d0, so it need not stop private111. */
@@ -587,11 +621,18 @@ int AirPlayReceiverSessionPlatformControl(void *session, unsigned flags,
      * URLs. AUG22 dio does not implement it and returns kNotHandledErr, which
      * AirPlay turns into HTTP 422. Preserve every stock result except that
      * exact missing-handler result while the AltScreen mutation is armed. */
+    if (cmd_name && !strcmp(cmd_name, "suggestUI") && alt_phone_card_profile()) {
+        /* Card profile: a changed offer (e.g. an instruction card once a route
+         * starts) re-sends showUI with the selected card context. */
+        int offered_mask = fullchain_log_suggest_ui(params);
+        if (offered_mask >= 0)
+            p1404_cockpit_native_suggest_ui(session, (unsigned)offered_mask);
+    }
     if (cmd_name && !strcmp(cmd_name, "suggestUI") &&
         p1404_armed && p1404_mutate_armed &&
         r == ALTSCREEN_K_NOT_HANDLED_ERR) {
-        altscreen_log("PHASE=SUGGEST_UI_ACCEPTED session=%p stock_rc=%d return_rc=0 policy=LIVI_NOOP urls_not_shown=1",
-                      session, r);
+        altscreen_log("PHASE=SUGGEST_UI_ACCEPTED session=%p stock_rc=%d return_rc=0 policy=LIVI_NOOP urls_not_shown=1 phone_card_refresh=%s",
+                      session, r, alt_phone_card_profile() ? "conditional" : "off");
         return 0;
     }
     return r;

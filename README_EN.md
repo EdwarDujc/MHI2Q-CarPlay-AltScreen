@@ -1,8 +1,10 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.7Fix6
+# MIB2 Toolbox — CarPlay AltScreen V3.8
 
 **English** | [简体中文](README.md)
 
 This project is designed for the Audi **MHI2Q** platform and displays the **native CarPlay AltScreen / secondary navigation view** directly on the vehicle's **Virtual Cockpit**. The core display path has been verified in a vehicle. Read this document in full before making changes to the head unit.
+
+**V3.8 update: CarPlay calls on the cluster telephone tab (ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony); the cluster's lower info bar shows the estimated arrival time after the road name; new install modes with the iPhone's maneuver card; fixed the cluster display staying blank on the first connection; the project's original parts are now under a noncommercial license that forbids selling.**
 
 **V3.7 update: full RGI navigation-data integration is now available (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi)), color conversion for the secondary display now runs on the GPU, cutting whole-system CPU usage from about 80% to about 20%, the runtime watermark has been removed, and starting with V3.7 the whole project is open source under GPL-3.0.**
 
@@ -16,7 +18,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 > **Disclaimer**
 >
 > - Every change this project makes is written to, and affects, the head unit's system files. Installing, updating, starting and restoring all modify stock programs, configuration and firewall rules, and can affect how the head unit works.
-> - This project is provided free of charge and "as is", without warranty of any kind (see sections 15 and 16 of the GPL-3.0).
+> - This project is provided free of charge and "as is", without warranty of any kind (see the No Liability section of the PolyForm Noncommercial 1.0.0 and sections 15 and 16 of the GPL-3.0).
 > - **By using this project you accept these risks and take full responsibility for the consequences. The authors and contributors accept no liability for any problem arising from using, installing, restoring or modifying this project, including but not limited to head-unit faults, malfunctions, failure to boot, data loss, voided warranty, or any other direct or indirect damage.**
 > - If you do not agree to these terms, do not install or use this project.
 
@@ -62,7 +64,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 >
 > Because freely shared test builds were previously repackaged and resold without permission, earlier versions of this project published only the runtime package and released features in stages. **Starting with V3.7, the project is fully open source**: every feature and all source code are published in this repository.
 >
-> The whole project is licensed under the **[GNU GPL v3.0](LICENSE)**: anyone may use, modify, and redistribute it, and anyone who redistributes binaries or modified versions must also provide the complete source under GPL-3.0. See "Licensing, authors, and third-party files" below.
+> **Starting with V3.8, this project's original parts may not be sold.** The second-screen hook, the display process, the install scripts, the green menu and the documentation are now licensed under **PolyForm Noncommercial 1.0.0 + [Additional Terms](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md)**: individuals may use, study and modify them and share them free of charge; selling them or distributing them for a fee is prohibited; anyone who installs them for others for a fee may charge at most CNY 100 in total per vehicle per installation. The Java HMI and RGI parts based on Luka's and Allemon's work remain under GPL-3.0. See "Licensing, authors, and third-party files" below.
 >
 > This is not a demonstration build. The current CarPlay AltScreen functionality is already usable in a real vehicle.
 >
@@ -70,7 +72,7 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 >
 > **Shared free of charge.** The source and installation packages are available for free on GitHub; do not pay for them.
 >
-> You are welcome to learn from, study, and discuss the project. If someone provides you with this project or a modified version of it, the GPL-3.0 entitles you to request the complete source from them.
+> You are welcome to learn from, study, and discuss the project. If someone sells you this project, or charges you more than CNY 100 to install it, please report it through Issues.
 
 > [!IMPORTANT]
 > This project modifies system files on the head unit. Keep the SD card inserted and maintain stable power during installation, start, or recovery operations.  
@@ -93,11 +95,20 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 - Wireless CarPlay: the 君用 (Junyong) M2Pro wireless adapter on its latest beta firmware has been tested to support the cluster display, RGI, wheel zoom and CarPlay projection
 - Full RGI navigation-data integration (built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi))
   - Maneuver arrows and lane guidance on the cluster
-  - Can be enabled or left out at install time (`INSTALL WITH RGI` / `INSTALL NO RGI`)
+  - Can be enabled or left out at install time (enabled by `INSTALL WITH RGI` / `INSTALL WITH RGI CARD`; `INSTALL WITH NOTHING` / `INSTALL WITH CARD` show no maneuver arrows)
+- CarPlay calls on the cluster telephone tab (**ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony**)
+  - Stock shows only "Your iPhone is in Apple CarPlay mode" on the tab; now it shows ringing, dialing, active and held calls with the caller's name, number and the call timer, like a Bluetooth phone
+  - Accept, hang up, hold / resume, swap between two calls and mute the microphone from the cluster and the steering wheel
+  - Recents (iPhone sends at most 12) and favorites, dialable from the list; missed-call indication, signal bars and carrier
+  - The TEL key on the head unit goes straight to the CarPlay phone instead of the "Apple CarPlay mode" popup
+  - CarPlay gives the car no phonebook and no caller picture: the cluster Directory shows "no phonebook"
+  - Active in every install mode; with a Bluetooth phone everything stays stock
+- The cluster's lower info bar shows the estimated arrival time after the road name, for example "Main St | 14:35"; available in every install mode, and not shown twice when the navigation app already includes it
+- iPhone maneuver card (`INSTALL WITH CARD` / `INSTALL WITH RGI CARD`): the iPhone draws its maneuver card next to the cluster map; choose its position with `CARD LEFT` / `CARD TOP` / `CARD RIGHT` in the green menu. For now the card appears only in the full-map view of the B9 (A4/A5 and similar) and Q7 layouts
 - Classic / Sport dynamic layout adaptation
 - Global centering
 - Left steering-wheel scroll-wheel zoom
-- Cluster map shows the speed-limit sign and compass, without an ETA overlay
+- Cluster map shows the speed-limit sign and compass, without an ETA overlay on the map (the arrival time is in the lower info bar)
 - GPU color conversion: whole-system CPU usage cut from about 80% to about 20%
 - At cold start, the secondary display waits for the stock cluster map to be ready
 - Fixed-port firewall rule for the secondary display; no dropouts when LTE changes IP
@@ -210,8 +221,25 @@ In vehicle testing, **whole-system CPU usage dropped from about 80% to about 20%
 
 ### RGI navigation-data path
 
-- `libcarplay_rgi_meta.so` receives iAP2 RouteGuidance data inside the stock CarPlay process and passes it to the Java HMI over local TCP port 19810. Both install modes load it and start this local bus: `INSTALL NO RGI` only turns off the navigation-data module, while notices such as stock-map readiness still travel over the bus.
+- `libcarplay_rgi_meta.so` receives iAP2 RouteGuidance data inside the stock CarPlay process and passes it to the Java HMI over local TCP port 19810. Every install mode loads it and starts this local bus, which also carries the stock-map readiness notice. The modes without RGI, `INSTALL WITH NOTHING` / `INSTALL WITH CARD`, still receive navigation data, but use it only for the road name and arrival time in the lower info bar and do not start the maneuver renderer.
 - Maneuver arrows and lane guidance are sent over local TCP port 19800 to the separate `maneuver_render` process, which draws them on displayable 98. The process is supervised by `rgi_supervisor.sh` and restarted a limited number of times if it exits unexpectedly.
+
+### Lower info bar: road name and arrival time
+
+During navigation the Java HMI writes the road name and the estimated arrival time into the cluster's lower info bar (BAP FctID 19) as "road | arrival time". If the text from the navigation app already contains an arrival time, only one is kept. `INSTALL WITH RGI` / `WITH RGI CARD` also take over the maneuver arrow, distances and remaining time; `INSTALL WITH NOTHING` / `WITH CARD` write only this one line and leave everything else to the stock behavior.
+
+### iPhone maneuver card
+
+With `INSTALL WITH CARD` / `WITH RGI CARD`, the hook declares a cluster layout with a maneuver card to the iPhone and widens the full-map area, and the iPhone draws the card directly in the secondary-display video. `CARD LEFT` / `CARD TOP` / `CARD RIGHT` store the position on the head unit; the hook reads it every 100 ms, so with CarPlay connected it applies right away in the full-map view without reconnecting. A new INSTALL resets it to the default, TOP. The small-map view and layouts other than B9 and Q7 have no room for the card and show only the map.
+
+### Cluster telephone tab
+
+This feature is ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony (see its `docs/cluster-and-rgi/CARPLAY_TELEPHONY.md`) and adapted to this project's single HMI JAR.
+
+- While CarPlay is connected, stock tells the cluster over BAP that the phone is in Apple CarPlay mode, so the telephone tab shows only a note. The Java HMI wraps the stock cluster phone service: only while stock itself reports CarPlay, it presents a hands-free phone to the cluster and fills in CarPlay's calls, lists and signal; when CarPlay goes away it replays stock's values. With a Bluetooth phone everything passes to stock unchanged.
+- Call state comes from the stock terminal-mode event bus (stock already forwards the DSICarplay call state there), and dialing uses stock CarPlay's `tel:` dial. Unlike Luka's version, this project does not replace `CarplayDSILifecycleController`, which differs on the CN firmware, so one HMI JAR serves US (MU1316), EU (MU1329) and CN (MU1003).
+- The telephony module in `libcarplay_rgi_meta.so` subscribes to recents and favorites over iAP2, reads the signal, carrier and battery data stock already subscribes to, and sends accept, end, swap, hold and mute to the iPhone; it talks to Java over the same local TCP port 19810. INSTALL registers the 7 iAP2 message IDs (`0x415B`–`0x415D`, `0x415F`, `0x4160`, `0x4170`, `0x4171`) in `dio_manager.json`; RESTORE puts the original file back.
+- Three stock classes are replaced: `ServiceManagerPhone` and the phone and system state-machine `Activator`s. They are byte-identical on all three firmware trains; if this project's telephony classes cannot load, the stock objects are used, so the stock phone and the HMI start as before.
 
 ### Steering-wheel zoom
 
@@ -227,9 +255,9 @@ Starting with V3.7, all source code is in this repository:
 |---|---|---|
 | `Toolbox/carplay_alt_screen/src/` | Preload hook for the stock CarPlay process: private111 secondary display, frame readback, viewArea, wheel zoom | `universal/libcarplay_altscreen.so` |
 | `Toolbox/carplay_alt_screen/mirror_display/` | Secondary-display process (C++ / GLES / displayable3) with GPU color conversion and the embedded startup logo | `mirror_display/release/carplay-alt111-mirror-display` |
-| `Toolbox/carplay_alt_screen/rgi_native/` | RGI preload hook: iAP2 RouteGuidance parsing and forwarding, stock-map readiness forwarding | `rgi_meta/libcarplay_rgi_meta.so` |
+| `Toolbox/carplay_alt_screen/rgi_native/` | RGI preload hook: iAP2 RouteGuidance parsing and forwarding, stock-map readiness forwarding; `telephony/` is the iAP2 module of the cluster telephone tab (ported from Luka's mib2q-carplay-rgi) | `rgi_meta/libcarplay_rgi_meta.so` |
 | `Toolbox/carplay_alt_screen/rgi_renderer/` | Maneuver-arrow / lane-guidance renderer | `rgi_renderer/release/maneuver_render` |
-| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook: Context80, cluster layers, RGI distribution, wheel events, stock-map startup wait; `stubs/` holds compile-only stock API stubs and `vendor/` the baseline JAR | `hmi/carplay_hook-basevideo3.jar` |
+| `Toolbox/carplay_alt_screen/hmi/` | Java HMI hook: Context80, cluster layers, RGI distribution, wheel events, stock-map startup wait; `src/com/luka/carplay/telephony/` and the replaced stock classes under `src/de/audi/` are the cluster telephone tab (ported from Luka's mib2q-carplay-rgi); `stubs/` holds compile-only stock API stubs and `vendor/` the baseline JAR; source for its classes that are not compiled from `src/` is in `vendor/src/`, with per-class notes in `vendor/SOURCES.md` | `hmi/carplay_hook-basevideo3.jar` |
 | `Toolbox/scripts/`, `Toolbox/GEM/` | Install / start / status / restore / diagnostic scripts and the green menu | Used from the SD card |
 | `Tools/`, `BUILD-*.sh` | Build and verification tools | — |
 
@@ -312,7 +340,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.7 Fix6`**) and that the menu has only three entries: `INSTALL NO RGI`, `INSTALL WITH RGI`, and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
+   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.8`**) and that the menu has four install entries (`INSTALL WITH NOTHING`, `INSTALL WITH RGI`, `INSTALL WITH CARD`, `INSTALL WITH RGI CARD`), three card-position entries (`CARD LEFT`, `CARD TOP`, `CARD RIGHT`), and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
 
 5. If you still see:
 
@@ -329,8 +357,12 @@ Installing and enabling are now one step, so **only one reboot is needed**:
 
 1. **Disconnect the iPhone / CarPlay** so navigation video is not playing during installation.
 2. In the `MMI-Cockpit-Carplay` menu, select one install mode:
-   - `INSTALL WITH RGI` (recommended): secondary-display map + full RGI (maneuver arrows, lane guidance).
-   - `INSTALL NO RGI`: secondary-display map only, without the RGI components; useful if you only want the map or are troubleshooting RGI.
+   - `INSTALL WITH RGI` (recommended): secondary-display map + full RGI (maneuver arrows, lane guidance) + road name and arrival time in the lower info bar.
+   - `INSTALL WITH RGI CARD`: everything in `INSTALL WITH RGI`, plus the iPhone's maneuver card.
+   - `INSTALL WITH CARD`: secondary-display map + the iPhone's maneuver card + road name and arrival time in the lower info bar, without maneuver arrows.
+   - `INSTALL WITH NOTHING`: secondary-display map + road name and arrival time in the lower info bar, without maneuver arrows or the card; useful if you only want the map or are troubleshooting RGI.
+
+   For now the maneuver card appears only in the full-map view of the B9 (A4/A5 and similar) and Q7 layouts. Choose its position with `CARD LEFT` / `CARD TOP` / `CARD RIGHT`; the default is TOP, a change applies right away while CarPlay is connected, and a new INSTALL resets it to TOP.
 3. Wait for the final `RESULT:` line. Do not remove the card, cut power, or reboot before it appears. The installer runs five steps and shows each one live:
 
    ```text
@@ -344,7 +376,9 @@ Installing and enabling are now one step, so **only one reboot is needed**:
 4. After `RESULT: SUCCESS`, **fully reboot the head unit once**, then connect the iPhone, enter CarPlay, start navigation, and check that the Virtual Cockpit shows the secondary display and updates with navigation. At cold start the secondary display appears only after the stock cluster map has loaded; this is expected.
 5. If it shows `RESULT: FAILED`, the lines below it say which step failed, what state the head unit is in now (unchanged / rolled back / restored to stock), and what to do next. The full run is in the SD-card log shown after `Log:`.
 
-The install mode is recorded as `INSTALL_RGI_MODE=WITH / NO` in the install log on the SD card (`MMI-Cockpit-Carplay/logs/operations/install_*.log`). To switch modes, simply run INSTALL again with the other mode; the installer removes the current version first.
+The install mode is recorded as `INSTALL_RGI_MODE=WITH / NO` and `INSTALL_CARD_MODE=WITH / NO` in the install log on the SD card (`MMI-Cockpit-Carplay/logs/operations/install_*.log`). To switch modes, simply run INSTALL again with the other mode; the installer removes the current version first.
+
+The cluster telephone tab and the arrival time in the lower info bar are enabled in every install mode. After upgrading from an older version, run INSTALL once more and fully reboot so the iAP2 message IDs they need are registered.
 
 > [!NOTE]
 > When the secondary display starts, it first plays a startup video of about 5 seconds (filling the cluster) and then switches to the CarPlay picture. This is expected. It is not the vehicle boot logo.
@@ -363,6 +397,7 @@ The install mode is recorded as `INSTALL_RGI_MODE=WITH / NO` in the install log 
 - After installation, each boot's runtime logs are saved automatically to `MMI-Cockpit-Carplay/logs/boots/boot_*/` on the SD card (the card must be inserted at boot). They cover private111 connect / teardown, H.264, Screen readback, decoded SHM, display frame rate, displayable3, Context80, view-area and layout state, firewall rules and network state, and the stock system log.
 - Logs from install, restore, and other operations are saved to `MMI-Cockpit-Carplay/logs/operations/` on the SD card.
 - Live logs on the head unit are under `/tmp/`, for example `/tmp/altscreen_hook.log` and the RGI renderer's `/tmp/maneuver_render.log`.
+- Cluster telephone tab logs: the Java side writes to `carplay_hook.log` (`TELEPHONY_BRIDGE`, `TELEPHONY_GATE`, `TELEPHONY_LISTS`, `TELEPHONY_ACTION`, `TELEPHONY_POPUP_SKIP`), the iAP2 side to `carplay_rgi_native.log` (`TELEPHONY_READY`, `TELEPHONY_LISTS_REQUESTED`, `TELEPHONY_CMD`). Both are saved with the boot logs under `streams/` on the SD card.
 - When something goes wrong, save the complete logs before changing any configuration or code. When reporting an issue, attach the whole `MMI-Cockpit-Carplay/logs/` directory from the SD card and include the firmware version and region, the Classic / Sport and FULL / SMALL layout, and how the phone was connected (phone plugged in before the head unit started / after it fully started / quick reconnect).
 
 ### 7. Restore the stock configuration
@@ -392,7 +427,7 @@ Upgrading **no longer needs a manual restore**:
 
 1. Disconnect the iPhone / CarPlay and insert the SD card that retains the `MMI-Cockpit-Carplay` stock-backup directory (the card used for the original install).
 2. Merge the new overlay into that SD card as described in section 2, and delete the leftover `logo.rgba` and `watermark.rgba` from the old version. Keep the `MMI-Cockpit-Carplay` directory on the card intact.
-3. Run `Update Toolbox` as described in section 3, then run `INSTALL WITH RGI` or `INSTALL NO RGI` as described in section 4. When the installer finds an old version, it first runs a full, verified restore, then installs the new version.
+3. Run `Update Toolbox` as described in section 3, then choose an install mode and run INSTALL as described in section 4. When the installer finds an old version, it first runs a full, verified restore, then installs the new version.
 4. After `RESULT: SUCCESS`, fully reboot the head unit once.
 
 If the card holds no stock backup (for example, after switching SD cards), the installer stops at step 2 with a message and does not change the head unit.
@@ -403,29 +438,37 @@ Changing head-unit system files can cause a blank screen or require recovery.
 
 ## Contributing
 
-**V3.7 is fully open source, and everyone is welcome to help maintain the project, fix issues, and add new features.**
+**All of this project's source code is public, and everyone is welcome to help maintain the project, fix issues, and add new features.**
 
 - Report problems through Issues, with complete logs, the firmware version and region, the layout, and how the phone was connected. For general discussion, join the [Telegram group](https://t.me/+xZ2pabi2nmk1MDI9) or QQ group **823297190**.
 - Submit fixes and new features through Pull Requests; see "Source layout and building" above for how to build. Vehicle test results on US / ER and other regional firmware are also welcome and help widen the validated scope.
 - In a pull request, describe the test vehicle, firmware version, test steps, and results.
 - Change one layer at a time: do not introduce a new decoder, a new Context, and broad display-structure changes in the same change, or it becomes hard to tell which layer caused a problem.
 - Vehicle tests should cover cold start (phone plugged in before the head unit started / after it fully started / quick reconnect) and the four Classic / Sport × FULL / SMALL layouts, and confirm that `RESTORE ORIGINAL` still restores correctly.
-- Contributed code is released with this project under GPL-3.0.
+- Contributed code is released under the license of the part it changes: changes to `src/`, `mirror_display/`, the scripts, the green menu or the documentation under PolyForm Noncommercial 1.0.0 + Additional Terms, and changes to `hmi/`, `rgi_native/` or `rgi_renderer/` under GPL-3.0. By submitting a pull request you agree to license your contribution under these terms.
 
 ---
 
 ## Licensing, authors, and third-party files
 
-This project is developed by [yuedizhibo](https://github.com/yuedizhibo) and [Lanye-z](https://github.com/Lanye-z). **V3.7 is fully open source**: this repository publishes all C/C++ source code, runtime binaries, installation scripts, and documentation, and the whole project is released under the **[GNU General Public License v3.0](LICENSE)** (GPL-3.0).
-
-The GPL-3.0 allows anyone to use, study, modify, and redistribute this project, including for commercial purposes. Anyone who redistributes binaries or modified versions must provide the complete corresponding source under GPL-3.0 and keep the existing copyright and license notices.
+This project is developed by [yuedizhibo](https://github.com/yuedizhibo) and [Lanye-z](https://github.com/Lanye-z). This repository publishes all C/C++ source code, runtime binaries, installation scripts, and documentation. V3.7 through V3.7Fix6 were released under GPL-3.0; **starting with V3.8, the parts are licensed as shown below** (overview in [LICENSE](LICENSE), per-directory details in [NOTICE.md](Toolbox/carplay_alt_screen/NOTICE.md)).
 
 | Part | Origin | License |
 |---|---|---|
-| Secondary-display path (`src/`, `mirror_display/`), install / restore / diagnostic scripts, green menu, documentation, etc. | Original to this project | GPL-3.0 |
-| Java HMI and full RGI (`hmi/`, `rgi_native/`, `rgi_renderer/`) | Built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi); renderer merged from [Allemon/mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen) | GPL-3.0 |
-| Upstream MIB2 Toolbox files | [jilleb/mib2-toolbox](https://github.com/jilleb/mib2-toolbox) | [MIT](LICENSE.TOOLBOX-MIT), GPL-3.0 compatible |
-| Mirror runtime component | [Lanye-z's MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [Unlicense](Toolbox/carplay_alt_screen/mirror_display/release/LICENSE.MMI-MIRROR), GPL-3.0 compatible |
+| Second-screen hook (`src/`), second-screen display process (`mirror_display/`), install / restore / diagnostic scripts, green menu, documentation, etc. | Original to this project; the display backend was originally taken from [Lanye-z's MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [PolyForm Noncommercial 1.0.0](Toolbox/carplay_alt_screen/LICENSE.POLYFORM-NONCOMMERCIAL-1.0.0.md) + [Additional Terms](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md) |
+| Java HMI and full RGI (`hmi/`, `rgi_native/`, `rgi_renderer/`), including the code this project added or changed in them | Built on [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi); renderer merged from [Allemon/mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen) | [GPL-3.0](Toolbox/carplay_alt_screen/LICENSE.GPL-3.0.txt) |
+| Cluster telephone tab (`hmi/src/com/luka/carplay/telephony/`, the replaced stock classes under `hmi/src/de/audi/`, `rgi_native/src/telephony/`) | Ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) (CarPlay Telephony); this project takes the call state from the stock event bus and falls back to the stock objects if its classes cannot load | [GPL-3.0](Toolbox/carplay_alt_screen/LICENSE.GPL-3.0.txt) |
+| Upstream MIB2 Toolbox files | [jilleb/mib2-toolbox](https://github.com/jilleb/mib2-toolbox) | [MIT](LICENSE.TOOLBOX-MIT) |
+| Original MMI Mirror code | [Lanye-z's MMI Mirror](https://github.com/Lanye-z/MHI2Q-CarPlay-MMI-Mirror) | [Unlicense](Toolbox/carplay_alt_screen/mirror_display/release/LICENSE.MMI-MIRROR) |
+
+**Rules for this project's original parts** (the text of the [Additional Terms](Toolbox/carplay_alt_screen/LICENSE.ADDITIONAL-TERMS.md) prevails):
+
+- Individuals may use, study and modify them free of charge, and may share them free of charge, as long as the author's name and the license notices are kept.
+- **No selling**: you may not sell the software, its installation packages or modified versions; you may not distribute it for a fee through paid downloads, points, memberships, activation codes or similar; and you may not use it as a selling point to raise the price of hardware or other goods.
+- **Paid installation is allowed, with a cap**: when installing it on someone else's vehicle, the total charge per vehicle per installation may not exceed CNY 100, with other currencies converted at the exchange rate in effect at the time of the charge. The total includes labor, on-site visits, remote assistance, SD cards and every other fee. Installers must use the original package published on GitHub and tell the owner that the software is free and where it comes from.
+- For any commercial use beyond these rules, contact the author for a separate written license.
+
+The GPL-3.0 parts may still be used, modified and redistributed by anyone under GPL-3.0; whoever redistributes them must provide the complete corresponding source and keep the existing copyright and license notices. The second-screen hook and the display process are independent programs that neither contain nor link the code of the GPL-3.0 parts; the installation package only distributes them together.
 
 Other third-party files shipped with the source (such as `stb_image.h` and the Unicode data file) keep their own licenses. Keep the original license notices of third-party files.
 
@@ -437,7 +480,7 @@ Current recommended version:
 
 ~~~text
 main
-└── AUG22 / V3.7Fix6
+└── AUG22 / V3.8
     ├── China-region (CN) firmware: vehicle-tested and working
     ├── Some European-region (ER) firmware: reported working by users (P5092 / P5152, MU 1329)
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
@@ -446,6 +489,16 @@ main
 The current public release prioritizes stable installation, normal use, and reliable recovery.
 
 ### Changelog
+
+**V3.8**
+
+- CarPlay calls on the cluster telephone tab (ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony): ringing, dialing, active and held calls with the caller's name, number and call duration, like a Bluetooth phone; accept, hang up, hold or resume, swap between two calls and mute from the cluster and the steering wheel; recents and favorites, dialable from the list, plus missed-call indication, signal and carrier; the TEL key on the head unit goes straight to the CarPlay phone instead of the "Apple CarPlay mode" popup. With a Bluetooth phone everything stays stock. Phonebook and caller pictures are not supported (CarPlay does not give them to the car).
+- During navigation the cluster's lower info bar shows the estimated arrival time after the road name, for example "Main St | 14:35". Available in every install mode; not shown twice when the navigation app already includes it.
+- New iPhone maneuver card: choose `INSTALL WITH CARD` or `INSTALL WITH RGI CARD` at install time and the iPhone's maneuver card appears next to the cluster map; choose its position with `CARD LEFT` / `CARD TOP` / `CARD RIGHT` in the green menu. For now the card appears only in the full-map view of the B9 (A4/A5 and similar) and Q7 layouts; the small-map view and other layouts show only the map.
+- Fixed the cluster showing no picture on the first CarPlay connection until the phone was plugged in again.
+- `INSTALL NO RGI` is renamed `INSTALL WITH NOTHING`; this mode now also shows the road name and arrival time in the lower info bar, without maneuver arrows. The green menu now has four install entries, three card-position entries and `RESTORE ORIGINAL`, and the version label is `V3.8`.
+- License change: the project's original parts are now under PolyForm Noncommercial 1.0.0 + additional terms and may not be sold; paid installation is allowed, but the total charge per car per installation may not exceed RMB 100. The parts based on Luka / Allemon stay under GPL-3.0.
+- After upgrading from an older version, run INSTALL once more and fully reboot the head unit; the telephone tab and the arrival time take effect only after that.
 
 **V3.7Fix6**
 
@@ -511,9 +564,9 @@ The current public release prioritizes stable installation, normal use, and reli
 
 ## Public-release notice
 
-Starting with V3.7, the project is fully open source: every feature, all source code, the installable runtime package, and related documentation are public and released under GPL-3.0.
+Starting with V3.7, every feature, all source code, the installable runtime package, and related documentation are public. V3.7 through V3.7Fix6 were released under GPL-3.0. Starting with V3.8, this project's original parts are released under PolyForm Noncommercial 1.0.0 + Additional Terms and may not be sold, while the parts based on Luka's and Allemon's work remain under GPL-3.0; see "Licensing, authors, and third-party files".
 
-> **Shared free of charge: this project is available for free on GitHub; do not pay for it.**
+> **Shared free of charge: this project is available for free on GitHub; do not pay for it. Anyone who installs it for others for a fee may charge at most CNY 100 per vehicle per installation.**
 
 ---
 
@@ -521,7 +574,7 @@ Starting with V3.7, the project is fully open source: every feature, all source 
 
 Thanks to the following projects and authors, whose work this project builds on:
 
-- [Luka](https://github.com/luka-dev)'s [mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi): the foundation of the full RGI navigation-data integration and the Java HMI, and reference for MHI2Q CarPlay navigation guidance, HMI, and instrument-cluster interaction.
+- [Luka](https://github.com/luka-dev)'s [mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi): the foundation of the full RGI navigation-data integration and the Java HMI, the source of the cluster telephone tab (CarPlay Telephony), and reference for MHI2Q CarPlay navigation guidance, HMI, and instrument-cluster interaction.
 - [Allemon](https://github.com/Allemon)'s [mib2-carplay-rgi-altscreen](https://github.com/Allemon/mib2-carplay-rgi-altscreen): upstream implementation of the RGI maneuver renderer.
 - [LIVI](https://github.com/f-io/LIVI): research reference for CarPlay main-display and instrument-cluster secondary-display protocol behavior.
 - [jilleb](https://github.com/jilleb)'s [MIB2 High Toolbox](https://github.com/jilleb/mib2-toolbox): upstream project for the SD-card toolchain, engineering menu, and scripts.

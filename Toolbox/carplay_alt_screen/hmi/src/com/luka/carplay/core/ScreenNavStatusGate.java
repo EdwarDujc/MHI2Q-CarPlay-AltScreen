@@ -21,6 +21,7 @@ public final class ScreenNavStatusGate {
     private static boolean desiredRouteBlocked;
     private static boolean appliedRouteBlocked;
     private static boolean desiredCurrentPositionBlocked;
+    private static boolean desiredCurrentPositionTextOnly;
     private static boolean installScheduled;
     private static long installScheduledAt, lastInstallWarning;
     private static int installTicket;
@@ -86,6 +87,7 @@ public final class ScreenNavStatusGate {
                 }
                 if (previous != null && previous != gate) previous.retire();
                 gate.setRouteGuidanceBlocked(desiredRouteBlocked);
+                gate.setCurrentPositionTextOnly(desiredCurrentPositionTextOnly);
                 gate.setCurrentPositionInfoBlocked(desiredCurrentPositionBlocked);
                 if (current != gate) cs.setCombiBAPListenerCombiService(gate);
                 clusterService = cs;
@@ -95,6 +97,7 @@ public final class ScreenNavStatusGate {
             }
 
             gate.setRouteGuidanceBlocked(desiredRouteBlocked);
+            gate.setCurrentPositionTextOnly(desiredCurrentPositionTextOnly);
             gate.setCurrentPositionInfoBlocked(desiredCurrentPositionBlocked);
             appliedRouteBlocked = desiredRouteBlocked;
             appliedRevision = gate.hasPendingReplay() ? -1 : policyRevision;
@@ -199,6 +202,7 @@ public final class ScreenNavStatusGate {
         clusterService = cs;
         gate = next;
         gate.setRouteGuidanceBlocked(desiredRouteBlocked);
+        gate.setCurrentPositionTextOnly(desiredCurrentPositionTextOnly);
         gate.setCurrentPositionInfoBlocked(desiredCurrentPositionBlocked);
         seedInstrumentState(cs);
         appliedRouteBlocked = desiredRouteBlocked;
@@ -225,9 +229,19 @@ public final class ScreenNavStatusGate {
      * NavigationJobs, so changing these volatile policy bits requires no
      * service-field mutation. */
     public static synchronized void setCurrentPositionInfoBlocked(boolean blocked) {
-        if (desiredCurrentPositionBlocked != blocked) ++policyRevision;
+        setCurrentPositionInfoBlocked(blocked, false);
+    }
+
+    /** textOnly (NO RGI): the block covers only FctID 19/20; stock keeps 21/22/46. */
+    public static synchronized void setCurrentPositionInfoBlocked(boolean blocked, boolean textOnly) {
+        if (desiredCurrentPositionBlocked != blocked
+                || (blocked && desiredCurrentPositionTextOnly != textOnly)) ++policyRevision;
         desiredCurrentPositionBlocked = blocked;
-        if (blocked && gate != null) gate.setCurrentPositionInfoBlocked(true);
+        if (blocked) desiredCurrentPositionTextOnly = textOnly;
+        if (blocked && gate != null) {
+            gate.setCurrentPositionTextOnly(textOnly);
+            gate.setCurrentPositionInfoBlocked(true);
+        }
         scheduleInstallLocked();
     }
 

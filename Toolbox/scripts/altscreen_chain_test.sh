@@ -105,7 +105,7 @@ INSTALL_TXN_DIR="$SD_ROOT/install-transaction/active"
 RUNTIME_OWNER=.mmi-cockpit-carplay-runtime-owner
 RUNTIME_PUBLISHED=0
 RUNTIME_HAD_CURRENT=0
-RUNTIME_SCRIPTS="altscreen_chain_test.sh altscreen_chain_test_known.sh altscreen_chain_test_universal.sh altscreen_console.sh altscreen_install.sh altscreen_v33_rgi_config.sh altscreen_sd_writable.sh altscreen_install_transaction.sh altscreen_restore_transaction.sh altscreen_restore_apply.sh altscreen_persistent_diag.sh altscreen_adaptive_diag.sh altscreen_boot_diag.sh altscreen_live_diag.sh altscreen_preload.awk install_mmi_cockpit_carplay_rx.sh install_mmi_cockpit_carplay_no_rgi.sh install_mmi_cockpit_carplay_with_rgi.sh start_mmi_cockpit_carplay_test.sh start_mmi_cockpit_carplay_rx_test.sh force_start_mmi_cockpit_carplay_rx_test.sh stop_mmi_cockpit_carplay_test.sh status_mmi_cockpit_carplay_test.sh finish_mmi_cockpit_carplay_test.sh"
+RUNTIME_SCRIPTS="altscreen_chain_test.sh altscreen_chain_test_known.sh altscreen_chain_test_universal.sh altscreen_console.sh altscreen_install.sh altscreen_v33_rgi_config.sh altscreen_sd_writable.sh altscreen_install_transaction.sh altscreen_restore_transaction.sh altscreen_restore_apply.sh altscreen_persistent_diag.sh altscreen_adaptive_diag.sh altscreen_boot_diag.sh altscreen_live_diag.sh altscreen_preload.awk install_mmi_cockpit_carplay_rx.sh install_mmi_cockpit_carplay_no_rgi.sh install_mmi_cockpit_carplay_with_rgi.sh install_mmi_cockpit_carplay_with_card.sh install_mmi_cockpit_carplay_with_rgi_card.sh cluster_card_layout.sh start_mmi_cockpit_carplay_test.sh start_mmi_cockpit_carplay_rx_test.sh force_start_mmi_cockpit_carplay_rx_test.sh stop_mmi_cockpit_carplay_test.sh status_mmi_cockpit_carplay_test.sh finish_mmi_cockpit_carplay_test.sh"
 
 mount_app_rw(){ [ "$TESTING" = 1 ] || mount -uw /mnt/app; }
 mount_app_ro(){ [ "$TESTING" = 1 ] || mount -ur /mnt/app; }
@@ -259,6 +259,12 @@ install_runtime_scripts(){
     if [ "${ALTS_INSTALL_RGI_MODE:-WITH}" = NO ]; then
         printf '' > "$RUNTIME_STAGE/state/rgi.disabled" || return 1
         chmod 644 "$RUNTIME_STAGE/state/rgi.disabled" || return 1
+    fi
+    # Phone maneuver card (INSTALL WITH CARD / RGI CARD). The hook reads it on
+    # every showUI; CARD LEFT/TOP/RIGHT write state/cluster-card-layout.txt.
+    if [ "${ALTS_INSTALL_CARD_MODE:-NO}" = WITH ]; then
+        printf '' > "$RUNTIME_STAGE/state/card.enabled" || return 1
+        chmod 644 "$RUNTIME_STAGE/state/card.enabled" || return 1
     fi
     echo "RUNTIME_STAGING_POLICY=BOUNDED path=/mnt/app/root/.carplay-altscreen.new legacy_pid_staging=reaped"
     for name in $RUNTIME_SCRIPTS; do
@@ -648,6 +654,7 @@ case "$CMD" in
     ;;
   install)
     case "${ALTS_INSTALL_RGI_MODE:-WITH}" in NO|WITH) ;; *) fail "invalid RGI install mode" ;; esac
+    case "${ALTS_INSTALL_CARD_MODE:-NO}" in NO|WITH) ;; *) fail "invalid card install mode" ;; esac
     restore_transaction_active && fail "restore transaction is active; recover/finish RESTORE ORIGINAL before INSTALL"
     install_transaction_cleanup_terminal
     if install_transaction_active && [ "${ALTS_INSTALL_TXN_ACTIVE:-0}" != 1 ]; then

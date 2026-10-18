@@ -34,8 +34,17 @@ public class GatedCombiService implements CombiBAPServiceNavi {
      * travel information and destination menu; maneuver/lane records remain
      * session-gated. */
     volatile boolean blockCurrentPositionInfo;
+    /* NO RGI text-only: the block covers only the route-text line (FctID 19/20);
+     * stock keeps distance/arrival/destination (FctID 21/22/46). */
+    volatile boolean currentPositionTextOnly;
 
     public GatedCombiService(CombiBAPServiceNavi r) { this.real = r; }
+
+    /* Index into latest[]: 3 and 8..11 are the position fields, the rest route guidance. */
+    private boolean fieldBlocked(int i) {
+        if (i != 3 && i < 8) return blockRouteGuidance;
+        return blockCurrentPositionInfo && (i == 3 || i == 8 || !currentPositionTextOnly);
+    }
 
     /** Route-data ownership. BAPBridge is the only writer for the maneuver FctIDs while CarPlay RGI
      * is active.  Scale and altitude are NOT gated on this branch: the cluster shows the stock native
@@ -50,6 +59,16 @@ public class GatedCombiService implements CombiBAPServiceNavi {
         if (blockCurrentPositionInfo && !blocked) markReplay(true);
         blockCurrentPositionInfo = blocked;
         if (!blocked) replay(true);
+    }
+
+    /* Applied before the block itself; narrowing an active block replays the released fields. */
+    public synchronized void setCurrentPositionTextOnly(boolean textOnly) {
+        boolean narrowing = blockCurrentPositionInfo && !currentPositionTextOnly && textOnly;
+        currentPositionTextOnly = textOnly;
+        if (narrowing) {
+            for (int i=9; i<latest.length; i++) if (latest[i] != null) replayPending[i] = true;
+            replay(true);
+        }
     }
 
     private void markReplay(boolean position) {
@@ -116,17 +135,17 @@ public class GatedCombiService implements CombiBAPServiceNavi {
 
     public synchronized void updateDistanceToDestination(int a, int b, boolean c) {
         latest[9] = new Object[]{new Integer(a), new Integer(b), (c ? Boolean.TRUE : Boolean.FALSE)};
-        if (!blockCurrentPositionInfo) { real.updateDistanceToDestination(a,b,c); replayPending[9] = false; }
+        if (!fieldBlocked(9)) { real.updateDistanceToDestination(a,b,c); replayPending[9] = false; }
     }
 
     public synchronized void updateTimeToDestination(int a, int b, long c) {
         latest[10] = new Object[]{new Integer(a), new Integer(b), new Long(c)};
-        if (!blockCurrentPositionInfo) { real.updateTimeToDestination(a,b,c); replayPending[10] = false; }
+        if (!fieldBlocked(10)) { real.updateTimeToDestination(a,b,c); replayPending[10] = false; }
     }
 
     public synchronized void updateDestinationInfo(CombiBAPDestinationInfo a) {
         latest[11] = new Object[]{a};
-        if (!blockCurrentPositionInfo) { real.updateDestinationInfo(a); replayPending[11] = false; }
+        if (!fieldBlocked(11)) { real.updateDestinationInfo(a); replayPending[11] = false; }
     }
 
     private long lastReplayWarning;
@@ -141,7 +160,7 @@ public class GatedCombiService implements CombiBAPServiceNavi {
         for (int i=0; i<latest.length; i++) {
             if (!replayPending[i] || latest[i] == null) continue;
             boolean isPosition = i==3 || i>=8;
-            if (isPosition != position || (position ? blockCurrentPositionInfo : blockRouteGuidance)) continue;
+            if (isPosition != position || fieldBlocked(i)) continue;
             Object[] v = latest[i];
             try {
                 switch (i) {

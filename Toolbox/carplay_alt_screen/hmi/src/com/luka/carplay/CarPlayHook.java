@@ -18,6 +18,7 @@ import com.luka.carplay.framework.CarplayBus;
 import com.luka.carplay.framework.Log;
 
 import com.luka.carplay.routeguidance.RouteGuidance;
+import com.luka.carplay.telephony.TelephonyEventBridge;
 import de.audi.app.terminalmode.IContext;
 import de.audi.app.terminalmode.device.IActiveDeviceStateListener;
 import de.audi.app.terminalmode.device.IDeviceManager;
@@ -134,6 +135,11 @@ public class CarPlayHook {
          * Idempotent. */
         CarplayBus.getInstance().start();
 
+        /* Cluster telephone tab: CarPlay call state and dialing from the stock
+         * terminal-mode event bus.  Once per bus, every install mode; it never
+         * throws into the activation. */
+        TelephonyEventBridge.attach(context);
+
         active = true;
         carplayPresent = true;
         savedContext = context;
@@ -235,10 +241,13 @@ public class CarPlayHook {
 
     private static boolean initNow(Object context) {
         if (!active || savedContext != context) return false;
-        Object naviService = isRgiDisabled() ? null : getNaviService(context);
+        Object naviService = isRgiWithdrawn() ? null : getNaviService(context);
         IDeviceManager deviceManager = getDeviceManager(context);
+        /* NO RGI install keeps the lower-bar route text (road + ETA) only. It never
+         * holds activation back: the resident monitor retries the service. */
+        boolean textOnly = isRgiPresentationDisabled();
 
-        if (deviceManager == null || (!isRgiDisabled() && naviService == null)) {
+        if (deviceManager == null || (!isRgiWithdrawn() && !textOnly && naviService == null)) {
             return false;
         }
 
@@ -249,8 +258,9 @@ public class CarPlayHook {
          * and BAPBridge. */
         if (!registerListener(deviceManager)) return false;
         if (routeGuidance != null) return true;
-        routeGuidance = isRgiDisabled() ? null : new RouteGuidance();
-        if (routeGuidance != null && !routeGuidance.init(naviService)) {
+        if (isRgiWithdrawn() || naviService == null) return true;
+        routeGuidance = new RouteGuidance(textOnly);
+        if (!routeGuidance.init(naviService)) {
             long now = com.luka.carplay.framework.ElapsedClock.nowMs();
             if (lastInitFailureLog == 0 || now < lastInitFailureLog || now - lastInitFailureLog >= 10000L) {
                 lastInitFailureLog = now;
@@ -259,7 +269,7 @@ public class CarPlayHook {
             try { routeGuidance.stop(); }
             catch (Throwable t) { Log.e(TAG, "failed RGI init cleanup", t); }
             routeGuidance = null;
-            return false;
+            return textOnly;
         }
 
         /* Cover art is handled by TerminalModeBapCombi$EventListener */
@@ -352,11 +362,15 @@ public class CarPlayHook {
         return frameworkAccess;
     }
 
-    /* The existing START/RESTORE scripts can stop RGI while this JVM is
-     * still resident. Teardown finishes before the owned runtime is removed. */
-    private static boolean isRgiDisabled() {
-        return new File("/mnt/app/root/carplay-altscreen/state/rgi.disabled").exists()
-                || new File("/tmp/mmi-rgi.disabled").exists();
+    /* RESTORE withdraws every RGI-derived output while this JVM is still
+     * resident. Teardown finishes before the owned runtime is removed. */
+    private static boolean isRgiWithdrawn() {
+        return new File("/tmp/mmi-rgi.disabled").exists();
+    }
+
+    /* NO RGI install: no maneuver presentation; route text stays in the lower bar. */
+    private static boolean isRgiPresentationDisabled() {
+        return new File("/mnt/app/root/carplay-altscreen/state/rgi.disabled").exists();
     }
 
     public static void pollRgiRuntime() {
@@ -366,16 +380,22 @@ public class CarPlayHook {
     private static void pollRgiRuntimeNow() {
         com.luka.carplay.core.ScreenNavStatusGate.retryPending(active);
         com.luka.carplay.routeguidance.BAPBridge.retryKomoCleanup();
+        RouteGuidance current = routeGuidance;
+        if (current != null && current.isTextOnly() != isRgiPresentationDisabled()) {
+            // Install mode changed under a resident JVM; the next probe rebuilds it.
+            Log.i(TAG, "RGI install mode changed; rebuilding route guidance");
+            retireRouteGuidance();
+        }
         long now = com.luka.carplay.framework.ElapsedClock.nowMs();
         if (active && savedContext != null &&
                 (now < lastServiceProbe || now - lastServiceProbe >= 1000L)) {
             lastServiceProbe = now;
             if (tryInit(savedContext) && carplayRunning && routeGuidance != null
-                    && !isRgiDisabled() && !routeGuidance.isRunning()) routeGuidance.start();
+                    && !isRgiWithdrawn() && !routeGuidance.isRunning()) routeGuidance.start();
             if (routeGuidance != null) routeGuidance.refreshServices();
         }
         RouteGuidance rg = routeGuidance;
-        if (isRgiDisabled()) {
+        if (isRgiWithdrawn()) {
             retireRouteGuidance();
             releaseNaviService();
             try { new File("/tmp/mmi-rgi.stopped").createNewFile(); }

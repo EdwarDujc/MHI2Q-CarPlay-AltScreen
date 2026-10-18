@@ -127,19 +127,26 @@ static void ensure_fw_lock_init(void) {
  * constructors reached LOG_INFO, whose lazy logger created a pthread while
  * ldqnx still owned the loader lock.  Register modules only after a real
  * Cinemo call proves that dio_manager and all dependencies are live. */
-static int native_rgi_disabled(void) {
-    return access("/mnt/app/root/carplay-altscreen/state/rgi.disabled", F_OK) == 0 ||
-           access("/tmp/mmi-rgi.disabled", F_OK) == 0;
+/* /tmp/mmi-rgi.disabled is RESTORE's runtime withdrawal.  The persistent NO RGI
+ * install (state/rgi.disabled) keeps this module: Java shows road + ETA in the
+ * stock lower bar and only the maneuver renderer stays off. */
+static int native_rgi_withdrawn(void) {
+    return access("/tmp/mmi-rgi.disabled", F_OK) == 0;
 }
 static void init_modules_once(void) {
     size_t i;
-    int rgi_disabled = native_rgi_disabled();
+    int rgi_withdrawn = native_rgi_withdrawn();
     for (i = 0; i < hook_module_table_count; i++) {
         const hook_module_def_t* def = hook_module_table[i];
         if (!def) continue;
-        if (rgi_disabled && def->name && strcmp(def->name, "routeguidance") == 0) {
-            LOG_INFO(LOG_MODULE, "NATIVE_MODULE_POLICY routeguidance=DISABLED coverart=ENABLED");
-            continue;
+        if (def->name && strcmp(def->name, "routeguidance") == 0) {
+            if (rgi_withdrawn) {
+                LOG_INFO(LOG_MODULE, "NATIVE_MODULE_POLICY routeguidance=DISABLED reason=RUNTIME_WITHDRAWN coverart=ENABLED");
+                continue;
+            }
+            LOG_INFO(LOG_MODULE, "NATIVE_MODULE_POLICY routeguidance=ENABLED presentation=%s",
+                     access("/mnt/app/root/carplay-altscreen/state/rgi.disabled", F_OK) == 0 ?
+                     "LOWER_BAR_TEXT_ONLY" : "RGI");
         }
         if (hook_framework_register_module(def) != HOOK_OK) continue;
         if (def->on_init) def->on_init();

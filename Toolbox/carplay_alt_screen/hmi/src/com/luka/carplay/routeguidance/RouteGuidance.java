@@ -35,6 +35,9 @@ public class RouteGuidance implements CarplayBus.Listener {
 
     /* State */
     private BAPBridge bap;
+    /* NO RGI install: route text in the stock lower bar only. Never exposes the
+     * RGI presentation (ctx 80 / displayable 98) and never starts the renderer. */
+    private final boolean textOnly;
     private volatile boolean running;
     private boolean rgActive = false;
     /* Separate from rgActive: route intent/BAP ownership may already be active while stock
@@ -317,9 +320,15 @@ public class RouteGuidance implements CarplayBus.Listener {
     /**
      * Initialize with BAP service.
      */
+    public RouteGuidance() { this(false); }
+
+    public RouteGuidance(boolean lowerBarTextOnly) { textOnly = lowerBarTextOnly; }
+
+    public boolean isTextOnly() { return textOnly; }
+
     public boolean init(Object naviService) {
         bap = new BAPBridge();
-        if (!bap.init(naviService)) {
+        if (!bap.init(naviService, textOnly)) {
             Log.e(TAG, "BAPBridge init failed");
             bap = null;
             return false;
@@ -584,7 +593,7 @@ public class RouteGuidance implements CarplayBus.Listener {
                  * for the text hold and position scroll, but no longer gates the context. */
                 presentationConfirmed = false;
                 rgActive = bap != null && bap.onStart();
-                com.luka.carplay.core.ScreenModule.setNavActive(rgActive);
+                if (!textOnly) com.luka.carplay.core.ScreenModule.setNavActive(rgActive);
                 if (!rgActive) {
                     if (!bapStartPendingLogged) {
                         Log.w(TAG, "RG activation pending: BAP start did not complete; keeping ctx 74");
@@ -628,8 +637,10 @@ public class RouteGuidance implements CarplayBus.Listener {
             boolean confirmed = rendererAndBapReady && (presentationConfirmed || updatePublished);
             if (confirmed != presentationConfirmed) {
                 presentationConfirmed = confirmed;
-                if (confirmed) com.luka.carplay.core.ScreenModule.onRendererFrameReady();
-                if (confirmed) {
+                if (confirmed && !textOnly) com.luka.carplay.core.ScreenModule.onRendererFrameReady();
+                if (confirmed && textOnly) {
+                    Log.i(TAG, "Lower-bar text CONFIRMED: FctID 19 route text published");
+                } else if (confirmed) {
                     Log.i(TAG, "RG presentation CONFIRMED: BAP snapshot published + popup frame ready");
                 } else {
                     Log.w(TAG, "RG presentation lost: keeping route state and ctx 80");
@@ -833,7 +844,7 @@ public class RouteGuidance implements CarplayBus.Listener {
         if (!rgActive) {
             rgActive = bap.onStart();
             if (!rgActive) return true;
-            com.luka.carplay.core.ScreenModule.setNavActive(true);
+            if (!textOnly) com.luka.carplay.core.ScreenModule.setNavActive(true);
         }
 
         // FRAME_READY can win the race with the worker's first wake. Rebase
@@ -856,8 +867,9 @@ public class RouteGuidance implements CarplayBus.Listener {
         boolean confirmed = bap.isPresentationReady() && (presentationConfirmed || published);
         if (confirmed != presentationConfirmed) {
             presentationConfirmed = confirmed;
-                if (confirmed) com.luka.carplay.core.ScreenModule.onRendererFrameReady();
-            if (confirmed) Log.i(TAG, "RG presentation CONFIRMED from cached snapshot");
+                if (confirmed && !textOnly) com.luka.carplay.core.ScreenModule.onRendererFrameReady();
+            if (confirmed) Log.i(TAG, textOnly ? "Lower-bar text CONFIRMED from cached snapshot"
+                : "RG presentation CONFIRMED from cached snapshot");
         }
         return !confirmed || !published;
     }
