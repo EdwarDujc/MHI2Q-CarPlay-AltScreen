@@ -12,8 +12,6 @@ This project is designed for the Audi **MHI2Q** platform and displays the **nati
 
 **V3.7Fix6 update: fixes the missing secondary display on the cluster once the LTE data link is up. The head unit then switches to per-uplink firewall configurations such as `pf.ecm0.conf`, and the installer now writes the 6031 pass rule into those as well.**
 
-**Current startup and display optimization: the stock-map readiness probe is reduced from 500 ms to 200 ms; a normal `stream_ready` start reuses the already validated ready-frame progress instead of waiting for two frames again; CarPlay backing opacity is capped at 70/100 so the stock map remains visible underneath.**
-
 **V3.7Fix5 update: the secondary-display data port is fixed at 6031 and written into the head unit's firewall configuration, fixing the black cluster at cold start and cluster dropouts when LTE changes IP; at cold start the secondary display waits until the stock cluster map has loaded; fixes RGI lane guidance disappearing mid-route; the startup video now fills the cluster 1:1; the green menu is trimmed to three entries, and boot logs are saved to the SD card automatically.**
 
 > [!CAUTION]
