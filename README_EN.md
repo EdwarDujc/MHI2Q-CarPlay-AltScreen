@@ -213,7 +213,7 @@ At cold start, the Java HMI checks every 200 ms, on the stock navigation thread,
 
 This waits for the stock cluster map object to finish initializing, not for a GPS fix or an active route. Readiness is kept in memory only; hiding the stock map later does not close the gate again. There is no timeout: if the stock cluster map never comes up, the secondary display keeps waiting.
 
-When the display process is started normally from the `stream_ready` marker, it validates the producer PID, generation, cookie, sequence and current NV12 frame, then reuses the marker's already proven two-frame readiness progress instead of waiting for two more frames. An abnormal restart, a producer identity change or a failed validation still requires two fresh stable frames from the same session. The CarPlay backing layer is capped at opacity 70/100, leaving about 30% of the stock map visible beneath the card.
+When the display process is started normally from the `stream_ready` marker, it validates the producer PID, generation, cookie, sequence and current NV12 frame, then reuses the marker's already proven two-frame readiness progress instead of waiting for two more frames. An abnormal restart, a producer identity change or a failed validation still requires two fresh stable frames from the same session.
 
 ### Performance: GPU color conversion
 
