@@ -209,9 +209,11 @@ Virtual Cockpit
 
 ### 冷启动：等待原车仪表地图
 
-冷启动时，Java HMI 每 500 ms 在原车导航线程上检查一次仪表地图（MapKombi）是否已初始化。初始化完成后，通过本机总线（TCP 19810，命令 `0x0119`）通知 `libcarplay_rgi_meta.so`，再转交给 `libcarplay_altscreen.so`。收到通知之前，hook 不会向 iPhone 请求第二屏画面（`showUI` / `forceKeyFrame`）、不切换 viewArea，显示进程也不会启动，所以开屏视频和第二屏画面都要等原车地图就绪后才出现。CarPlay 主屏、第二屏能力声明和 iPhone 建立第二屏视频流不受影响。
+冷启动时，Java HMI 每 200 ms 在原车导航线程上检查一次仪表地图（MapKombi）是否已初始化；地图探测完成时会立即唤醒等待线程。初始化完成后，通过本机总线（TCP 19810，命令 `0x0119`）通知 `libcarplay_rgi_meta.so`，再转交给 `libcarplay_altscreen.so`。收到通知之前，hook 不会向 iPhone 请求第二屏画面（`showUI` / `forceKeyFrame`）、不切换 viewArea，显示进程也不会启动，所以开屏视频和第二屏画面都要等原车地图就绪后才出现。CarPlay 主屏、第二屏能力声明和 iPhone 建立第二屏视频流不受影响。
 
 这里等待的是原车仪表地图对象初始化完成，不是 GPS 定位，也不是开始导航。就绪状态只在内存中记录，之后原车地图隐藏也不会重新关闭。这一步没有超时：原车仪表地图没有起来时，第二屏一直等待。
+
+显示进程正常由 `stream_ready` 标记启动时，会校验标记中的 producer PID、generation、cookie、序号以及当前 NV12 帧，并复用标记已经证明的两帧就绪进度，不再重复等待两帧。若是异常重启、producer 身份变化或校验失败，仍会重新取得同一会话的两帧稳定画面。CarPlay 背板图层的不透明度最多为 70/100，因此第二屏卡片下仍能看到约 30% 的原车地图。
 
 ### 性能优化：GPU 颜色转换
 

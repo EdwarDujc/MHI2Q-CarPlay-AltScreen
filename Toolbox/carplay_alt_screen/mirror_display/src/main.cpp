@@ -3,6 +3,7 @@
 #include "startup_logo.h"
 #include "state_snapshot.h"
 #include "bounded_output.h"
+#include "startup_frame_progress.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -811,13 +812,38 @@ int main(int argc, char **argv) {
     Private111DirectSource source(verbose);
     bool source_initialized = false;
     bool recovered_current_session = false;
+    bool reused_producer_progress = false;
+    VideoFrame frame;
+    StartupFrameProgress startup_progress;
 
     if (env_truth("ALT111_RECOVER_CURRENT_SESSION")) {
         if (source.init()) {
-            VideoFrame recovery_probe;
-            unsigned fresh_frames = 0u;
             bool keyframe_asked = false;
             source_initialized = true;
+
+            /* Only a normal stream-supervised start may reuse the producer's
+             * two-frame marker. Crash recovery still proves fresh progress. */
+            if (env_truth("ALT111_STREAM_SUPERVISED") &&
+                !strcmp(volatile_path("ALT111_MIRROR_RESTART_REASON", ""), "stream_ready") &&
+                source.read_verified_startup_frame(
+                    volatile_path("ALT111_STREAM_READY_FILE", "/tmp/altscreen-private111.stream-ready"),
+                    &frame)) {
+                startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
+                startup_progress.frames = 2u;
+                recovered_current_session = reused_producer_progress = true;
+                fprintf(stderr,
+                        "direct111: PHASE=STARTUP_PROGRESS_REUSED source=producer_stream_ready "
+                        "validated_frames=2 writer_pid=%u generation=%u cookie=0x%08x "
+                        "stable_copy=1 live_producer=1 duplicate_frame_wait=0\n",
+                        (unsigned)startup_progress.writer, (unsigned)startup_progress.generation,
+                        (unsigned)startup_progress.cookie);
+            }
+            if (!recovered_current_session && source.decoded_ready() &&
+                source.current_frame_session_active()) {
+                /* A marker mismatch may follow a valid first copy. It is one
+                 * observed frame, not a two-frame proof; retain it for retry. */
+                startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
+            }
 
             /*
              * Matching active flags alone are not enough: a producer that died
@@ -825,23 +851,23 @@ int main(int argc, char **argv) {
              * Require two distinct stable decoded frames while H264+decoded SHM
              * identities still match before bypassing the consumed phone gate.
              */
-            for (unsigned retry = 0; retry < 80u && !g_stop; ++retry) {
+            for (unsigned retry = 0; retry < 80u && !g_stop && !recovered_current_session; ++retry) {
                 if (!source.current_session_active()) {
-                    fresh_frames = 0u;
+                    startup_progress.reset();
                     usleep(50000);
                     continue;
                 }
 
-                if (source.read_frame(&recovery_probe)) {
-                    ++fresh_frames;
-                    if (fresh_frames >= 2u) {
+                if (source.read_frame(&frame)) {
+                    startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
+                    if (startup_progress.frames >= 2u && source.current_frame_session_active()) {
                         recovered_current_session = true;
                         fprintf(stderr,
                                 "direct111: PHASE=GATE_RECOVER_CURRENT_SESSION "
                                 "validated=1 retries=%u fresh_decoded_frames=%u "
                                 "policy=matching_identity_plus_frame_progress "
                                 "consumed_phone_gate_bypass=1\n",
-                                retry, fresh_frames);
+                                retry, startup_progress.frames);
                         break;
                     }
                 }
@@ -862,6 +888,7 @@ int main(int argc, char **argv) {
                 source.shutdown();
                 source_initialized = false;
             }
+            startup_progress.reset();
         }
     }
 
@@ -879,14 +906,10 @@ int main(int argc, char **argv) {
         source_initialized = true;
     }
 
-    VideoFrame frame;
     bool wait_reported = false;
     unsigned long wait_loops = 0;
-    unsigned startup_fresh_frames = 0u;
-    uint32_t startup_writer = 0u;
-    uint32_t startup_generation = 0u;
-    uint32_t startup_cookie = 0u;
     unsigned long long last_keyframe_request_us = 0ULL;
+    if (!source.current_frame_session_active()) startup_progress.reset();
     fprintf(stderr,
             "direct111: PHASE=PIPELINE_WAIT "
             "waiting=H264_TAP+DECODER_FRESH_PROGRESS "
@@ -895,43 +918,32 @@ int main(int argc, char **argv) {
 
     while (!g_stop) {
         bound_private_output();
-        if (source.read_frame(&frame)) {
-            const uint32_t writer = source.writer_pid();
-            const uint32_t gen = source.generation();
-            const uint32_t cookie = source.stream_cookie();
-
-            if (writer != startup_writer ||
-                gen != startup_generation ||
-                cookie != startup_cookie) {
-                startup_writer = writer;
-                startup_generation = gen;
-                startup_cookie = cookie;
-                startup_fresh_frames = 1u;
-            } else {
-                ++startup_fresh_frames;
-            }
-
-            if (startup_fresh_frames >= 2u) {
+        if (startup_progress.frames < 2u && source.read_frame(&frame)) {
+            startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
+        }
+        if (startup_progress.frames >= 2u) {
+            if (source.current_frame_session_active()) {
                 fprintf(stderr,
                         "direct111: PHASE=PIPELINE_SOURCE_PRIMED "
                         "fresh_frames=%u writer_pid=%u generation=%u "
-                        "cookie=0x%08x stale_single_frame_rejected=1\n",
-                        startup_fresh_frames, (unsigned)startup_writer,
-                        (unsigned)startup_generation,
-                        (unsigned)startup_cookie);
+                        "cookie=0x%08x stale_single_frame_rejected=1 producer_progress_reused=%d\n",
+                        startup_progress.frames, (unsigned)startup_progress.writer,
+                        (unsigned)startup_progress.generation,
+                        (unsigned)startup_progress.cookie, reused_producer_progress ? 1 : 0);
                 break;
             }
+            startup_progress.reset();
         }
 
         /* Still short of two fresh frames for a known session: ask, then
          * re-ask every 3 s (bounded) instead of waiting for a quiet phone. */
-        if (source.writer_pid() && startup_fresh_frames < 2u) {
+        if (source.writer_pid() && startup_progress.frames < 2u) {
             const unsigned long long t = now_us();
             if (!last_keyframe_request_us ||
                 t - last_keyframe_request_us >= kKeyframeRequestRetryUs) {
                 last_keyframe_request_us = t ? t : 1ULL;
                 (void)request_consumer_keyframe(source,
-                    startup_fresh_frames ? "one_fresh_frame" : "no_fresh_frame");
+                    startup_progress.frames ? "one_fresh_frame" : "no_fresh_frame");
             }
         }
 
@@ -947,7 +959,7 @@ int main(int argc, char **argv) {
                     (unsigned)source.h264_bytes(),
                     source.decoded_ready() ? 1 : 0,
                     (unsigned)source.decoded_frames(),
-                    startup_fresh_frames);
+                    startup_progress.frames);
         }
         usleep(20000);
     }
