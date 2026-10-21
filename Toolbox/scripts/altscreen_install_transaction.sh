@@ -213,13 +213,46 @@ snap_pf_variants(){
 pf_variant_snapshots(){
   [ ! -f "$TXN/pf_variants.list" ] || cat "$TXN/pf_variants.list"
 }
+# QNX fs-dos cannot stat the parent entry of folders that a computer wrote to
+# some FAT cards: cp -R reports "<dir>/...: Filename too long" once per folder
+# and fails although every file reads by name. find reports the same entries
+# ("./<dir>/..: Filename too long") and exits 1 after listing the whole tree.
+# Tolerate exactly those reports and copy the tree file by file; the caller
+# still compares it byte for byte. Any other error is logged and fails.
+fsdos_parent_entry_only(){
+  [ -s "$1" ] && ! grep -Ev '/\.\.\.?\)?: Filename too long$' "$1" | grep -q .
+}
+list_snapshot_tree(){
+  (cd "$1" && find . -type "$2" -print) > "$3" 2>"$3.err" && { rm -f "$3.err"; return 0; }
+  fsdos_parent_entry_only "$3.err" || { cat "$3.err" >&2; rm -f "$3.err"; return 1; }
+  log "SNAPSHOT_LIST=FSDOS_PARENT_ENTRY_TOLERATED src=$1 type=$2 entries=$(grep -c . "$3.err")"
+  rm -f "$3.err"
+}
+copy_snapshot_tree(){
+  src=$1; dst=$2; err="$TXN/meta/copy_tree.err"
+  cp -R "$src/." "$dst/" 2>"$err" && { rm -f "$err"; return 0; }
+  fsdos_parent_entry_only "$err" || { cat "$err" >&2; rm -f "$err"; return 1; }
+  log "SNAPSHOT_COPY=FSDOS_PARENT_ENTRY_TOLERATED src=$src entries=$(grep -c . "$err")"
+  rc=0
+  list_snapshot_tree "$src" d "$err.dirs" && grep -q '^\.$' "$err.dirs" &&
+    list_snapshot_tree "$src" f "$err.files" || rc=1
+  if [ "$rc" = 0 ]; then
+    while IFS= read -r d; do ensure_dirs "$dst/$d" || { rc=1; break; }; done < "$err.dirs"
+  fi
+  if [ "$rc" = 0 ]; then
+    while IFS= read -r f; do cp "$src/$f" "$dst/$f" || { rc=1; break; }; done < "$err.files"
+  fi
+  [ "$rc" = 0 ] || log "SNAPSHOT_COPY=FAIL src=$src"
+  rm -f "$err" "$err.dirs" "$err.files"
+  return "$rc"
+}
 snap_dir(){
   src=$1; name=$2; dst="$TXN/dirs/$name"
   if [ -d "$src" ]; then
-    ensure_dirs "$dst" || return 1
-    cp -R "$src/." "$dst/" || return 1
-    same_dir_exact "$src" "$dst" || return 1
-    dir_manifest "$dst" "$TXN/meta/$name.manifest" || return 1
+    ensure_dirs "$dst" || { log "SNAPSHOT_DIR=FAIL name=$name step=mkdir"; return 1; }
+    copy_snapshot_tree "$src" "$dst" || { log "SNAPSHOT_DIR=FAIL name=$name step=copy"; return 1; }
+    same_dir_exact "$src" "$dst" || { log "SNAPSHOT_DIR=FAIL name=$name step=compare"; return 1; }
+    dir_manifest "$dst" "$TXN/meta/$name.manifest" || { log "SNAPSHOT_DIR=FAIL name=$name step=manifest"; return 1; }
     touch "$TXN/dirs/$name.present"
   else
     touch "$TXN/dirs/$name.absent"

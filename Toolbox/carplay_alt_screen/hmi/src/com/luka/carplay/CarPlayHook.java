@@ -19,6 +19,7 @@ import com.luka.carplay.framework.Log;
 
 import com.luka.carplay.routeguidance.RouteGuidance;
 import com.luka.carplay.telephony.TelephonyEventBridge;
+import com.luka.carplay.telephony.StockPhoneKeyFilter;
 import de.audi.app.terminalmode.IContext;
 import de.audi.app.terminalmode.device.IActiveDeviceStateListener;
 import de.audi.app.terminalmode.device.IDeviceManager;
@@ -139,6 +140,7 @@ public class CarPlayHook {
          * terminal-mode event bus.  Once per bus, every install mode; it never
          * throws into the activation. */
         TelephonyEventBridge.attach(context);
+        StockPhoneKeyFilter.install(context);   /* drop the duplicate stock MFL phone key during a gated CarPlay call; no-op if unreachable */
 
         active = true;
         carplayPresent = true;
@@ -178,6 +180,7 @@ public class CarPlayHook {
         carplayPresent = false;
         ClusterStateController.setCarPlaySessionActive(false);
         ClusterStateController.setRgiPresentationActive(false);
+        StockPhoneKeyFilter.uninstall();   /* restore the stock phone controller */
 
         try {
             /* Stop modules */

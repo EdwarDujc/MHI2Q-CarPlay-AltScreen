@@ -13,6 +13,9 @@ public:
 
     bool init(const Mhi2qBackendConfig &cfg);
     bool present_frame(const VideoFrame &frame);
+    /* Over opaque black at 0..1; present_faded() reuses the uploaded frame. */
+    bool present_frame_faded(const VideoFrame &frame, float opacity);
+    bool present_faded(float opacity);
     bool present_logo_frame(const unsigned char *rgba, int width, int height);
     bool present_logo_fade_frame(const VideoFrame &frame, float logo_opacity);
     void release_logo();

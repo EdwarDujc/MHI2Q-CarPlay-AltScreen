@@ -19,13 +19,14 @@
  *
  * Ported from LuKa's mib2q-carplay-rgi (GPL-3.0).  Differences: call state and dial
  * use the stock event bus instead of a patched CarplayDSILifecycleController, so one
- * jar serves the US/EU and CN trains; the stock steering-wheel HID copy is not
- * filtered (stock CarPlay FLASH did nothing on the MHI2Q car it was tested on).
+ * jar serves the US/EU and CN trains; the stock steering-wheel HID copy is dropped at
+ * runtime by StockPhoneKeyFilter instead of in a patched stock class.
  *
  * Copyright (c) 2026 LuKa (@LuKa_dev)
  */
 package com.luka.carplay.telephony;
 
+import com.luka.carplay.CarPlayHook;
 import com.luka.carplay.bus.CarplayBus;
 import com.luka.carplay.framework.Log;
 import de.audi.app.terminalmode.events.CallStateChangedEvent;
@@ -37,9 +38,11 @@ import de.audi.atip.interapp.combi.bap.phone.data.CombiBAPCallState;
 import de.audi.atip.interapp.combi.bap.phone.data.CombiBAPFavoriteNumberEntry;
 import de.audi.atip.interapp.combi.bap.phone.data.CombiBAPhoneMobileBatteryLevel;
 import de.audi.atip.interapp.combi.bap.phone.data.FsgSetup;
+import de.audi.atip.base.IFrameworkAccess;
 import de.audi.atip.interapp.phone.TelAdbEntryStruct;
 import java.lang.reflect.Method;
 import java.util.Calendar;
+import java.util.TimeZone;
 
 public class GatedPhoneService implements CombiBAPServicePhone {
     private static final String TAG = "Telephony";
@@ -158,7 +161,12 @@ public class GatedPhoneService implements CombiBAPServicePhone {
     public static void onCarPlayCalls(CallStateChangedEvent[] cs) {
         GatedPhoneService g;
         synchronized (GatedPhoneService.class) { g = instance; }
-        if (g != null) g.setCalls(cs);
+        if (g == null) return;
+        g.setCalls(cs);
+        /* Stock rewrites the MFL phone controller on every device-state update: re-arm the
+         * filter while a call exists, i.e. before the Tel press.  Outside our locks, since
+         * the filter's proxy calls back into dropStockPhoneKey. */
+        if (g.hasLiveCall()) StockPhoneKeyFilter.ensure();
     }
 
     /** A VC telephone action. Returns false when the gate is off, so stock handles it. */
@@ -168,10 +176,10 @@ public class GatedPhoneService implements CombiBAPServicePhone {
         return g != null && g.handle(action, number);
     }
 
-    /** True when the patched CarplayDSIController should swallow a stock MFL phone HID
-     * key: the key is accept/hangup/flash AND a gated CarPlay call exists, so the VC's
-     * BAP copy already answers it over iAP2. Without a call the VC sends no BAP action
-     * (it only opens the list), so the stock key passes through unchanged. */
+    /** True when StockPhoneKeyFilter should swallow a stock MFL phone HID key: the key is
+     * accept/hangup/flash AND a gated CarPlay call exists, so the VC's BAP copy already
+     * answers it over iAP2. Without a call the VC sends no BAP action (it only opens the
+     * list), so the stock key passes through unchanged. */
     public static boolean dropStockPhoneKey(int id) {
         if (id != BUTTON_ACCEPT_CALL && id != BUTTON_END_CALL && id != BUTTON_FLASH_CALL) return false;
         GatedPhoneService g;
@@ -180,6 +188,8 @@ public class GatedPhoneService implements CombiBAPServicePhone {
     }
 
     private synchronized boolean gatedWithCall() { return gated && liveCalls() > 0; }
+
+    private synchronized boolean hasLiveCall() { return liveCalls() > 0; }
 
     private synchronized boolean handle(int action, String number) {
         if (!gated) return false;
@@ -462,15 +472,37 @@ public class GatedPhoneService implements CombiBAPServicePhone {
         }
     }
 
+    private static final TimeZone GMT = TimeZone.getTimeZone("GMT");
+    private static boolean loggedUtcRecents;
+
+    /* iAP2 recents carry a UTC Unix time.  Shift it by the HU's own offset (time zone +
+     * DST, as the HU clock and the cluster ETA use) and split it as GMT, so the JVM
+     * default zone (UTC on MHI2Q) never shows the cluster UTC call times. */
     private static CombiBAPCallStackEntry recent(int pos, String name, String num, int mode, long ts) {
         if (ts <= 0) return new CombiBAPCallStackEntry(pos, name, num, 0, mode);
-        Calendar c = Calendar.getInstance();
-        c.setTime(new java.util.Date(ts > 100000000000L ? ts : ts * 1000L));  /* s or ms */
+        long utcMs = ts > 100000000000L ? ts : ts * 1000L;   /* s or ms */
+        Calendar c = Calendar.getInstance(GMT);
+        c.setTime(new java.util.Date(huLocalMs(utcMs)));
         return new CombiBAPCallStackEntry(pos, name, num, 0, mode,
             (short)c.get(Calendar.DAY_OF_MONTH), (short)(c.get(Calendar.MONTH) + 1),
             (short)c.get(Calendar.YEAR), (short)c.get(Calendar.HOUR_OF_DAY),
             (short)c.get(Calendar.MINUTE), (short)c.get(Calendar.SECOND),
             new TelAdbEntryStruct());
+    }
+
+    /** UTC epoch ms -> HU local epoch ms; UTC unchanged without the framework. */
+    private static long huLocalMs(long utcMs) {
+        try {
+            IFrameworkAccess fw = CarPlayHook.getFrameworkAccess();
+            if (fw != null) return fw.convertUTCTimeToLocalTime(utcMs);
+        } catch (Throwable t) {
+            /* fall through: UTC */
+        }
+        if (!loggedUtcRecents) {
+            loggedUtcRecents = true;
+            Log.w(TAG, "recents times stay UTC: HU framework time conversion unavailable");
+        }
+        return utcMs;
     }
 
     /* ---------------- publishing ---------------- */

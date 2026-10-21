@@ -73,6 +73,26 @@ bool ClusterVideoDisplay::present_frame(const VideoFrame &frame) {
     return present_uploaded_frame();
 }
 
+bool ClusterVideoDisplay::present_frame_faded(const VideoFrame &frame,
+                                              float opacity) {
+    if (!ready_ || !renderer_.upload_frame(frame)) {
+        fprintf(stderr, "display: frame texture upload failed\n");
+        return false;
+    }
+    return present_faded(opacity);
+}
+
+bool ClusterVideoDisplay::present_faded(float opacity) {
+    if (!ready_) return false;
+    renderer_.draw_faded(opacity);
+    if (!backend_.swap()) {
+        fprintf(stderr, "display: PHASE=EGL_SWAP_FAILED present=faded\n");
+        return false;
+    }
+    ++frame_count_;
+    return true;
+}
+
 bool ClusterVideoDisplay::present_logo_frame(const unsigned char *rgba,
                                               int width, int height) {
     if (!ready_ || !renderer_.upload_logo_rgba(rgba, width, height))

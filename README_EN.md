@@ -5,13 +5,17 @@
 This project is designed for the Audi **MHI2Q** platform and displays the **native CarPlay AltScreen / secondary navigation view** directly on the vehicle's **Virtual Cockpit**. The core display path has been verified in a vehicle. Read this document in full before making changes to the head unit.
 
 **V3.8 Fix1 update (plain-language: the things that were fixed):**
-- **On a CarPlay phone call, pressing "Answer" on the cluster dropped the call instantly** — it now answers normally and stays connected; hang up works too.
-- **Switching between the big map and the small map left half a frame showing on the cluster** — it now goes black briefly and shows the new view once it's ready, so you no longer see a half-drawn screen.
-- **The turn arrow jumped abruptly when it changed** — it now fades in and out.
+- **Answering a CarPlay call from the cluster or the steering wheel connected it, then hung it up a second or two later** — the call now stays connected until you hang up. (Validated in a vehicle.)
+- **Times in the cluster telephone tab's recents were 8 hours behind the phone** — they now show the head unit's local time, matching the phone.
+- **Switching between the big map and the small map left half a frame showing on the cluster** — it now goes black briefly and fades in the new view once it's ready, so you no longer see a half-drawn screen.
+- **The turn arrow jumped abruptly when it appeared or disappeared** — it now fades in and out.
 - **On the Audi Q7, the turn arrow didn't show when navigating with CarPlay only** — the arrow now appears.
 - **A stray grey box / backing plate showed on the cluster during navigation** — it's gone now, only the turn arrow remains.
 - **Installing or restoring failed after SD-card folders had been copied by a computer (especially a Mac)** — this is now tolerated and no longer aborts.
 - The green-menu header now reads "V3.8 Fix1".
+
+> [!TIP]
+> If the head unit boots with this project's SD card inserted, it restores that card as its "media" audio source, but the card holds no playable music. So right after CarPlay connects, while the phone is not playing anything yet, turning the volume reports it as unavailable; it works again as soon as the phone plays audio. This is the stock source logic, not a fault. After installing you can leave the card out for everyday driving and insert it only to collect logs.
 
 **V3.8 update: CarPlay calls on the cluster telephone tab (ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony); the cluster's lower info bar shows the estimated arrival time after the road name; new install modes with the iPhone's maneuver card; fixed the cluster display staying blank on the first connection; the project's original parts are now under a noncommercial license that forbids selling.**
 
@@ -218,11 +222,9 @@ Virtual Cockpit
 
 ### Cold start: waiting for the stock cluster map
 
-At cold start, the Java HMI checks every 200 ms, on the stock navigation thread, whether the cluster map (MapKombi) has been initialized; a completed map probe wakes the wait immediately. Once it has, it notifies `libcarplay_rgi_meta.so` over the local bus (TCP 19810, command `0x0119`), which hands the notice to `libcarplay_altscreen.so`. Until then the hook does not ask the iPhone for the secondary-display picture (`showUI` / `forceKeyFrame`), does not switch view areas, and the display process does not start, so both the startup video and the secondary display appear only after the stock map is ready. The main CarPlay display, the secondary-display capability exchange, and the iPhone setting up the secondary video stream are not delayed.
+At cold start, the Java HMI checks every 500 ms, on the stock navigation thread, whether the cluster map (MapKombi) has been initialized. Once it has, it notifies `libcarplay_rgi_meta.so` over the local bus (TCP 19810, command `0x0119`), which hands the notice to `libcarplay_altscreen.so`. Until then the hook does not ask the iPhone for the secondary-display picture (`showUI` / `forceKeyFrame`), does not switch view areas, and the display process does not start, so both the startup video and the secondary display appear only after the stock map is ready. The main CarPlay display, the secondary-display capability exchange, and the iPhone setting up the secondary video stream are not delayed.
 
 This waits for the stock cluster map object to finish initializing, not for a GPS fix or an active route. Readiness is kept in memory only; hiding the stock map later does not close the gate again. There is no timeout: if the stock cluster map never comes up, the secondary display keeps waiting.
-
-When the display process is started normally from the `stream_ready` marker, it validates the producer PID, generation, cookie, sequence and current NV12 frame, then reuses the marker's already proven two-frame readiness progress instead of waiting for two more frames. An abnormal restart, a producer identity change or a failed validation still requires two fresh stable frames from the same session.
 
 ### Performance: GPU color conversion
 
@@ -248,7 +250,9 @@ With `INSTALL WITH CARD` / `WITH RGI CARD`, the hook declares a cluster layout w
 This feature is ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony (see its `docs/cluster-and-rgi/CARPLAY_TELEPHONY.md`) and adapted to this project's single HMI JAR.
 
 - While CarPlay is connected, stock tells the cluster over BAP that the phone is in Apple CarPlay mode, so the telephone tab shows only a note. The Java HMI wraps the stock cluster phone service: only while stock itself reports CarPlay, it presents a hands-free phone to the cluster and fills in CarPlay's calls, lists and signal; when CarPlay goes away it replays stock's values. With a Bluetooth phone everything passes to stock unchanged.
-- Call state comes from the stock terminal-mode event bus (stock already forwards the DSICarplay call state there), and dialing uses stock CarPlay's `tel:` dial. Unlike Luka's version, this project does not replace `CarplayDSILifecycleController`, which differs on the CN firmware, so one HMI JAR serves US (MU1316), EU (MU1329) and CN (MU1003).
+- Call state comes from the stock terminal-mode event bus (stock already forwards the DSICarplay call state there), and dialing uses stock CarPlay's `tel:` dial. Unlike Luka's version, this project does not replace `CarplayDSILifecycleController` (Luka keeps a separate patch of that class for the CN firmware); it uses only public interfaces and runtime wrapping, so one HMI JAR serves US (MU1316), EU (MU1329) and CN (MU1003).
+- One press of the steering-wheel phone key reaches CarPlay twice: the cluster's BAP accept / hang-up (turned into iAP2 by this project) and the stock MFL phone key sent to the iPhone as a HID key. On a car where the HID key works, the second copy hangs up the call that was just answered. The Java HMI wraps the phone controller of the stock `DSISmartphoneManagerProxy` at runtime and drops the stock copy (hook / hangup / flash) only while the cluster telephone tab shows a CarPlay call and a call exists; other keys and the stock's other hang-up paths are untouched. This is equivalent to Luka's change in `postDSICarplayButtonEvent` without replacing any stock class. Stock rewrites that controller on every device switch, so the wrapper is re-armed on CarPlay activation and on every call-state update; if it cannot be installed it does nothing and stock behavior is unchanged.
+- Recent-call times arrive from the iPhone as UTC timestamps and are shown in the head unit's own time zone and DST, matching the head-unit clock and the arrival time in the lower bar.
 - The telephony module in `libcarplay_rgi_meta.so` subscribes to recents and favorites over iAP2, reads the signal, carrier and battery data stock already subscribes to, and sends accept, end, swap, hold and mute to the iPhone; it talks to Java over the same local TCP port 19810. INSTALL registers the 7 iAP2 message IDs (`0x415B`–`0x415D`, `0x415F`, `0x4160`, `0x4170`, `0x4171`) in `dio_manager.json`; RESTORE puts the original file back.
 - Three stock classes are replaced: `ServiceManagerPhone` and the phone and system state-machine `Activator`s. They are byte-identical on all three firmware trains; if this project's telephony classes cannot load, the stock objects are used, so the stock phone and the HMI start as before.
 
@@ -351,7 +355,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.8`**) and that the menu has four install entries (`INSTALL WITH NOTHING`, `INSTALL WITH RGI`, `INSTALL WITH CARD`, `INSTALL WITH RGI CARD`), three card-position entries (`CARD LEFT`, `CARD TOP`, `CARD RIGHT`), and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
+   Check that the version in the menu header matches the package you downloaded (currently **`Version: V3.8 Fix1`**) and that the menu has four install entries (`INSTALL WITH NOTHING`, `INSTALL WITH RGI`, `INSTALL WITH CARD`, `INSTALL WITH RGI CARD`), three card-position entries (`CARD LEFT`, `CARD TOP`, `CARD RIGHT`), and `RESTORE ORIGINAL`. If it still shows an older version, the menu and scripts on the head unit are still the old ones, and `INSTALL` would run the old installer; run `Update Toolbox` again and continue only once the version is correct.
 
 5. If you still see:
 
@@ -408,7 +412,7 @@ The cluster telephone tab and the arrival time in the lower info bar are enabled
 - After installation, each boot's runtime logs are saved automatically to `MMI-Cockpit-Carplay/logs/boots/boot_*/` on the SD card (the card must be inserted at boot). They cover private111 connect / teardown, H.264, Screen readback, decoded SHM, display frame rate, displayable3, Context80, view-area and layout state, firewall rules and network state, and the stock system log.
 - Logs from install, restore, and other operations are saved to `MMI-Cockpit-Carplay/logs/operations/` on the SD card.
 - Live logs on the head unit are under `/tmp/`, for example `/tmp/altscreen_hook.log` and the RGI renderer's `/tmp/maneuver_render.log`.
-- Cluster telephone tab logs: the Java side writes to `carplay_hook.log` (`TELEPHONY_BRIDGE`, `TELEPHONY_GATE`, `TELEPHONY_LISTS`, `TELEPHONY_ACTION`, `TELEPHONY_POPUP_SKIP`), the iAP2 side to `carplay_rgi_native.log` (`TELEPHONY_READY`, `TELEPHONY_LISTS_REQUESTED`, `TELEPHONY_CMD`). Both are saved with the boot logs under `streams/` on the SD card.
+- Cluster telephone tab logs: the Java side writes to `carplay_hook.log` (`TELEPHONY_BRIDGE`, `TELEPHONY_GATE`, `TELEPHONY_LISTS`, `TELEPHONY_ACTION`, `TELEPHONY_POPUP_SKIP`, plus `TELEPHONY_STOCK_HID_FILTER installed / re-armed / not installed` and `TELEPHONY_STOCK_HID_DROPPED` for the steering-wheel phone-key filter), the iAP2 side to `carplay_rgi_native.log` (`TELEPHONY_READY`, `TELEPHONY_LISTS_REQUESTED`, `TELEPHONY_CMD`). Both are saved with the boot logs under `streams/` on the SD card.
 - When something goes wrong, save the complete logs before changing any configuration or code. When reporting an issue, attach the whole `MMI-Cockpit-Carplay/logs/` directory from the SD card and include the firmware version and region, the Classic / Sport and FULL / SMALL layout, and how the phone was connected (phone plugged in before the head unit started / after it fully started / quick reconnect).
 
 ### 7. Restore the stock configuration
@@ -491,7 +495,7 @@ Current recommended version:
 
 ~~~text
 main
-└── AUG22 / V3.8
+└── AUG22 / V3.8 Fix1
     ├── China-region (CN) firmware: vehicle-tested and working
     ├── Some European-region (ER) firmware: reported working by users (P5092 / P5152, MU 1329)
     └── Other regional firmware: may have unknown bugs; not guaranteed to work 100%
@@ -500,6 +504,18 @@ main
 The current public release prioritizes stable installation, normal use, and reliable recovery.
 
 ### Changelog
+
+**V3.8 Fix1**
+
+- Fixed a CarPlay call answered from the cluster or the steering wheel hanging up about 1–2 seconds later: one phone-key press reached the iPhone both as the stock MFL HID key and as the cluster's iAP2 accept, and the second copy ended the call. The stock copy is now dropped at runtime during a CarPlay call, keeping only iAP2; no stock class is replaced, and it works on US / EU / CN. Validated in a CN (K1004) vehicle.
+- Fixed the cluster telephone tab's recents showing UTC times (8 hours behind Beijing time): they are now converted with the head unit's time zone and DST.
+- In Sport, switching between the big and small map shows a black frame on the cluster until the new picture is ready and then fades it in, instead of showing the old picture misplaced; same-position switches in Classic are unchanged.
+- The turn arrow now fades in and out, and is hidden before it moves, then fades back in.
+- Q7: when the cluster sends no arrow-visibility command for a CarPlay-only route, the turn arrow is shown 1.5 seconds after guidance starts; as soon as the cluster sends the command, the cluster decides. B9 is unchanged.
+- Removed the stray grey backing on the cluster during navigation; only the turn arrow remains.
+- SD cards whose folders were copied by a computer (especially a Mac) are now tolerated: install and restore no longer abort when QNX fails to copy a directory.
+- The green-menu version label is now `V3.8 Fix1`.
+- PR #62 (faster cold-start probing and display-process frame reuse) is not part of this release: it has not yet been built for QNX or validated in a vehicle, so it is not in the package, and the source is back to the version the package was built from. It will be merged once validated.
 
 **V3.8**
 

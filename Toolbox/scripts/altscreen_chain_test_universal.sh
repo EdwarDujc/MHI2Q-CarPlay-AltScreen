@@ -449,6 +449,39 @@ verify_backup_identity() (
     done < "$BACKUP_MANIFEST"
     say "BACKUP_IDENTITY=PASS stock_binaries=UNCHANGED"
 )
+# Older releases wrote the same project edits in another layout (a space before
+# the LD_PRELOAD entry, commented RGI IDs) that the exact rebuilds below cannot
+# reproduce. The stock remainder drops comment lines, whitespace, line-end
+# commas, project preload entries and project message IDs. Both sides go
+# through it, so only those differences are ignored.
+PROJECT_MESSAGE_IDS="0x5200 0x5201 0x5202 0x5203 0x5204 0x415B 0x415C 0x415D 0x415F 0x4160 0x4170 0x4171"
+config_project_remainder() {
+    awk -v ids="$PROJECT_MESSAGE_IDS" '
+        BEGIN { n=split(ids,id," ") }
+        /^[ \t]*#/ { next }
+        {
+            line=$0
+            gsub(/[ \t\r]/,"",line)
+            gsub(/\/mnt\/app\/root\/carplay-altscreen\/lib\/libcarplay_[A-Za-z0-9_]*\.so:/,"",line)
+            gsub(/\/mnt\/app\/root\/hooks\/(libcarplay_[A-Za-z0-9_]*|libcp_mirror)\.so:/,"",line)
+            gsub(/:\/mnt\/app\/root\/carplay-altscreen\/lib\/libcarplay_[A-Za-z0-9_]*\.so/,"",line)
+            gsub(/:\/mnt\/app\/root\/hooks\/(libcarplay_[A-Za-z0-9_]*|libcp_mirror)\.so/,"",line)
+            gsub(/=\/mnt\/app\/root\/carplay-altscreen\/lib\/libcarplay_[A-Za-z0-9_]*\.so"/,"=\"",line)
+            gsub(/=\/mnt\/app\/root\/hooks\/(libcarplay_[A-Za-z0-9_]*|libcp_mirror)\.so"/,"=\"",line)
+            gsub(/,"LD_PRELOAD="/,"",line); gsub(/"LD_PRELOAD=",/,"",line); gsub(/"LD_PRELOAD="/,"",line)
+            for (i=1;i<=n;i++) {
+                gsub(",\"" id[i] "\"","",line); gsub("\"" id[i] "\",","",line); gsub("\"" id[i] "\"","",line)
+            }
+            sub(/,$/,"",line)
+            if (line!="") print line
+        }'
+}
+project_remainder_match() {
+    config_project_remainder < "$1" > "$TXN_DIR/identity.$3.saved" &&
+    config_project_remainder < "$2" > "$TXN_DIR/identity.$3.live" &&
+    same_bytes "$TXN_DIR/identity.$3.saved" "$TXN_DIR/identity.$3.live" || return 1
+    say "BACKUP_CONTEXT_NOTE=PROJECT_LAYOUT_DIFFERS file=$3 stock_remainder=EXACT"
+}
 verify_config_context() (
     si=$1; dio=$2; pf=$3
     [ -s "$si" ] && [ -s "$dio" ] && [ -s "$pf" ] || return 1
@@ -462,7 +495,8 @@ verify_config_context() (
             -v insert_if_absent=1 -f "$PRELOAD_AWK" "$TXN_DIR/identity.si.rgi" > "$TXN_DIR/identity.si" || return 1
         if ! same_bytes "$TXN_DIR/identity.si" "$(p "$LIVE_JSON_SI")"; then
             awk -v hook="$UNIVERSAL_REL" -v insert_if_absent=1 -f "$PRELOAD_AWK" "$si" > "$TXN_DIR/identity.si.legacy-no" || return 1
-            same_bytes "$TXN_DIR/identity.si.legacy-no" "$(p "$LIVE_JSON_SI")" || {
+            same_bytes "$TXN_DIR/identity.si.legacy-no" "$(p "$LIVE_JSON_SI")" ||
+            project_remainder_match "$si" "$(p "$LIVE_JSON_SI")" smartphone_integrator || {
                 say "BACKUP_IDENTITY=REFUSED reason=SMARTPHONE_CONFIG_MISMATCH production_changed=NO"; return 1;
             }
         fi
@@ -479,7 +513,8 @@ verify_config_context() (
             done
             same_bytes "$TXN_DIR/identity.dio" "$dio_live" && { dio_match=1; break; }
         done
-        [ "$dio_match" = 1 ] || {
+        [ "$dio_match" = 1 ] ||
+        project_remainder_match "$dio" "$dio_live" dio_manager || {
             say "BACKUP_IDENTITY=REFUSED reason=DIO_CONFIG_MISMATCH production_changed=NO"; return 1;
         }
     fi

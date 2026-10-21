@@ -462,6 +462,7 @@ run_flat_plaintext() {
     flat_controller_offset=$(flat_read_cursor "${CURSOR_PREFIX}_controller.offset")
     flat_wheel_log_offset=$(flat_read_cursor "${CURSOR_PREFIX}_wheel-log.offset")
     flat_carplay_hook_offset=$(flat_read_cursor "${CURSOR_PREFIX}_carplay-hook.offset")
+    flat_carplay_trace_offset=$(flat_read_cursor "${CURSOR_PREFIX}_carplay-trace.offset")
     flat_rgi_offset=$(flat_read_cursor "${CURSOR_PREFIX}_rgi.offset")
     flat_rgi_native_offset=$(flat_read_cursor "${CURSOR_PREFIX}_rgi-native.offset")
     flat_supervisor_offset=$(flat_read_cursor "${CURSOR_PREFIX}_supervisor.offset")
@@ -483,6 +484,8 @@ run_flat_plaintext() {
         flat_controller_offset=$(flat_capture_delta "$(select_controller_log_source)" "$flat_controller_offset" "$FLAT_DEST/streams/mmi-mirror-controller.log" "${FLAT_PREFIX}_controller.chunk" "${CURSOR_PREFIX}_controller.offset")
         flat_wheel_log_offset=$(flat_capture_delta "$(select_wheel_log_source)" "$flat_wheel_log_offset" "$FLAT_DEST/streams/mmi-mirror-wheel-zoom.log" "${FLAT_PREFIX}_wheel_log.chunk" "${CURSOR_PREFIX}_wheel-log.offset")
         flat_carplay_hook_offset=$(flat_capture_delta "$(select_carplay_hook_log_source)" "$flat_carplay_hook_offset" "$FLAT_DEST/streams/carplay_hook.log" "${FLAT_PREFIX}_carplay_hook.chunk" "${CURSOR_PREFIX}_carplay-hook.offset")
+        # Synchronous Java crash breadcrumbs (CrashTrace); survives a j9 fault in /tmp.
+        flat_carplay_trace_offset=$(flat_capture_delta "$ROOT/tmp/carplay_trace.log" "$flat_carplay_trace_offset" "$FLAT_DEST/streams/carplay_trace.log" "${FLAT_PREFIX}_carplay_trace.chunk" "${CURSOR_PREFIX}_carplay-trace.offset")
         flat_rgi_offset=$(flat_capture_delta "$ROOT/tmp/maneuver_render.log" "$flat_rgi_offset" "$FLAT_DEST/streams/maneuver_render.log" "${FLAT_PREFIX}_rgi.chunk" "${CURSOR_PREFIX}_rgi.offset")
         flat_rgi_native_offset=$(flat_capture_delta "$ROOT/tmp/carplay_rgi_native.log" "$flat_rgi_native_offset" "$FLAT_DEST/streams/carplay_rgi_native.log" "${FLAT_PREFIX}_rgi_native.chunk" "${CURSOR_PREFIX}_rgi-native.offset")
         flat_supervisor_offset=$(flat_capture_delta "$ROOT/tmp/altscreen_stream_supervisor.log" "$flat_supervisor_offset" "$FLAT_DEST/streams/altscreen_stream_supervisor.log" "${FLAT_PREFIX}_supervisor.chunk" "${CURSOR_PREFIX}_supervisor.offset")
@@ -570,6 +573,12 @@ run_flat_plaintext() {
                 for rgi_verbose in "$ROOT/tmp/carplay_verbose" "$ROOT/mnt/app/carplay_verbose" "$ROOT/mnt/app/root/carplay-altscreen/state/rgi-debug.enabled"; do
                     if [ -f "$rgi_verbose" ]; then printf 'RGI_LOG_MARKER %s=PRESENT\n' "$rgi_verbose"; else printf 'RGI_LOG_MARKER %s=ABSENT\n' "$rgi_verbose"; fi
                 done
+                # Stock crash artifacts (j9/dio_manager cores, SI process dumps):
+                # names, sizes and times only; the files stay on the head unit.
+                printf 'CRASH_DUMPS_BEGIN\n'
+                ls -la "$ROOT/mnt/ota/system/core" 2>&1 || true
+                ls -la "$ROOT/mnt/ota/system/logs" 2>&1 | tail -n 40 || true
+                printf 'CRASH_DUMPS_END\n'
                 ls -la "$VOLUME/MMI-Cockpit-Carplay/state"
             } > "$flat_state" 2>&1
             flat_plain_append "$flat_state" "$FLAT_DEST/file_state.txt.log" 2>/dev/null || true

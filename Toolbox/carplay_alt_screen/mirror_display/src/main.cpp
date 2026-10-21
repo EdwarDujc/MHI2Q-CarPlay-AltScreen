@@ -3,7 +3,6 @@
 #include "startup_logo.h"
 #include "state_snapshot.h"
 #include "bounded_output.h"
-#include "startup_frame_progress.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -352,22 +351,10 @@ static bool state_kv_int(const char *line, const char *key, int *out) {
  * already represents that map plane, so Y=26 must not be applied again inside
  * this renderer and is not interpreted as a source crop.
  *
- * Card profiles (INSTALL WITH CARD / RGI CARD) use the Logo-tree layout: the
- * hook declares one SMALL safeArea (x=470,w=500) for Classic and Sport, and
- * Sport pans it by -445 so its center x=720 lands on the sport slot center
- * x=275. The profile only changes with INSTALL + reboot, so read it once.
+ * Card profiles (INSTALL WITH CARD / RGI CARD) widen only the FULL safeArea;
+ * SMALL shows no card and keeps the same safeArea and OEM Sport pan as every
+ * other profile, so placement does not depend on the card profile.
  */
-static bool card_layout_profile() {
-    static int cached = -1;
-    if (cached < 0) {
-        FILE *f = fopen("/mnt/app/root/carplay-altscreen/state/card.enabled", "r");
-        cached = f ? 1 : 0;
-        if (f) fclose(f);
-        fprintf(stderr, "direct111: PHASE=CARD_LAYOUT_PROFILE enabled=%d sport_small_dx=%s\n",
-                cached, cached ? "-445" : "OEM_STAGE_DX");
-    }
-    return cached == 1;
-}
 
 static OemMapPlacement load_session_map_placement() {
     OemMapPlacement p;
@@ -414,10 +401,7 @@ static OemMapPlacement load_session_map_placement() {
         return p;
 
     if (strstr(p.layout, "LayoutMIB2HighB9Sport")) {
-        if (card_layout_profile())
-            small_dx = -445;    /* Logo layout: center the shared SMALL area */
-        else if (!have_dx)
-            small_dx = -476;
+        if (!have_dx) small_dx = -476;
         if (!have_dy) small_dy = 0;
     }
 
@@ -446,6 +430,103 @@ static bool same_map_placement(const OemMapPlacement &a,
            a.recognized == b.recognized &&
            strcmp(a.view, b.view) == 0 &&
            strcmp(a.layout, b.layout) == 0;
+}
+
+/*
+ * Placement veil.  Sport FULL<->SMALL pans the whole map plane by the OEM
+ * small-stage offset.  The frame on hand was rendered by the phone for the old
+ * view area, and the VC may already be fading the new stage in, so drawing it
+ * at the new offset shows half a map.  Hold black until the phone has sent
+ * frames for the new view area (the hook polls the same HMI state every
+ * 100 ms; the phone answers updateViewArea in ~70 ms), then fade in from
+ * black.  A view change that keeps the offset (Classic FULL<->SMALL) never
+ * veils.
+ */
+static const unsigned long long kVeilMinHoldUs = 150000ULL;
+static const unsigned long long kVeilMaxHoldUs = 450000ULL;
+static const unsigned long long kVeilFadeUs = 150000ULL;
+static const unsigned kVeilMinFrames = 2u;
+
+/* Without new frames the fade advances on the last texture at ~60 Hz. */
+static const unsigned long long kVeilIdleRedrawUs = 16000ULL;
+
+struct PlacementVeil {
+    bool active;
+    bool fading;
+    unsigned long long start_us;
+    unsigned long long fade_start_us;
+    unsigned long long last_present_us;
+    unsigned frames;
+};
+static PlacementVeil g_veil;
+
+static void begin_placement_veil(ClusterVideoDisplay &display,
+                                 const char *reason,
+                                 const OemMapPlacement &from,
+                                 const OemMapPlacement &to) {
+    const bool restarted = g_veil.active;
+    g_veil.active = true;
+    g_veil.fading = false;
+    g_veil.start_us = monotonic_us();
+    g_veil.fade_start_us = 0;
+    g_veil.last_present_us = g_veil.start_us;
+    g_veil.frames = 0;
+    const bool black = display.present_faded(0.0f);
+    fprintf(stderr,
+            "direct111: PHASE=OEM_MAP_VEIL_BEGIN reason=%s view=%s layout=%s "
+            "renderer_offset=%d,%d->%d,%d restarted=%d black_presented=%d "
+            "min_hold_ms=%llu max_hold_ms=%llu fade_ms=%llu min_frames=%u\n",
+            reason ? reason : "poll", to.view, to.layout,
+            from.dx, from.dy, to.dx, to.dy, restarted ? 1 : 0, black ? 1 : 0,
+            kVeilMinHoldUs / 1000ULL, kVeilMaxHoldUs / 1000ULL,
+            kVeilFadeUs / 1000ULL, kVeilMinFrames);
+}
+
+/* frame == 0 is an idle poll.  Returns false only when presenting failed. */
+static bool present_through_veil(ClusterVideoDisplay &display,
+                                 const VideoFrame *frame) {
+    if (!g_veil.active)
+        return frame ? display.present_frame(*frame) : true;
+
+    const unsigned long long now = monotonic_us();
+    const unsigned long long held =
+        now >= g_veil.start_us ? now - g_veil.start_us : kVeilMaxHoldUs;
+    if (frame) ++g_veil.frames;
+    if (!g_veil.fading) {
+        const bool ready = held >= kVeilMinHoldUs &&
+                           g_veil.frames >= kVeilMinFrames;
+        if (ready || held >= kVeilMaxHoldUs) {
+            g_veil.fading = true;
+            g_veil.fade_start_us = now;
+            fprintf(stderr,
+                    "direct111: PHASE=OEM_MAP_VEIL_FADE held_ms=%llu "
+                    "frames=%u timeout=%d\n",
+                    held / 1000ULL, g_veil.frames, ready ? 0 : 1);
+        } else if (!frame) {
+            return true;    /* black is already on screen */
+        }
+    }
+
+    float opacity = 0.0f;
+    if (g_veil.fading) {
+        const unsigned long long faded =
+            now >= g_veil.fade_start_us ? now - g_veil.fade_start_us : kVeilFadeUs;
+        if (!frame && faded < kVeilFadeUs &&
+            now >= g_veil.last_present_us &&
+            now - g_veil.last_present_us < kVeilIdleRedrawUs)
+            return true;
+        opacity = faded >= kVeilFadeUs
+                      ? 1.0f : (float)faded / (float)kVeilFadeUs;
+        if (faded >= kVeilFadeUs) {
+            g_veil.active = false;
+            fprintf(stderr,
+                    "direct111: PHASE=OEM_MAP_VEIL_END total_ms=%llu frames=%u\n",
+                    held / 1000ULL, g_veil.frames);
+        }
+    }
+    g_veil.last_present_us = now;
+    return frame ? display.present_frame_faded(*frame, opacity)
+                 : display.present_faded(opacity);
 }
 
 static bool reconcile_oem_map_placement(ClusterVideoDisplay &display,
@@ -524,6 +605,9 @@ static bool reconcile_oem_map_placement(ClusterVideoDisplay &display,
         applied = true;
     }
 
+    const bool offset_changed = have_previous &&
+        (previous.dx != p.dx || previous.dy != p.dy);
+    const OemMapPlacement from = previous;
     previous = p;
     have_previous = true;
 
@@ -531,8 +615,16 @@ static bool reconcile_oem_map_placement(ClusterVideoDisplay &display,
      * A layout change must be visible even while the decoded producer is
      * temporarily idle. Re-draw the already-uploaded texture at the new
      * destination immediately; the next fresh frame continues normally.
+     * An offset change veils instead (see begin_placement_veil), and an
+     * active veil owns presentation until it has faded in.
      */
     if (applied && redraw_last_frame && display.first_frame_presented()) {
+        if (offset_changed) {
+            begin_placement_veil(display, reason, from, p);
+            return applied;
+        }
+        if (g_veil.active)
+            return applied;
         display.refresh();
         fprintf(stderr,
                 "direct111: PHASE=OEM_MAP_RERENDER reason=%s "
@@ -812,38 +904,13 @@ int main(int argc, char **argv) {
     Private111DirectSource source(verbose);
     bool source_initialized = false;
     bool recovered_current_session = false;
-    bool reused_producer_progress = false;
-    VideoFrame frame;
-    StartupFrameProgress startup_progress;
 
     if (env_truth("ALT111_RECOVER_CURRENT_SESSION")) {
         if (source.init()) {
+            VideoFrame recovery_probe;
+            unsigned fresh_frames = 0u;
             bool keyframe_asked = false;
             source_initialized = true;
-
-            /* Only a normal stream-supervised start may reuse the producer's
-             * two-frame marker. Crash recovery still proves fresh progress. */
-            if (env_truth("ALT111_STREAM_SUPERVISED") &&
-                !strcmp(volatile_path("ALT111_MIRROR_RESTART_REASON", ""), "stream_ready") &&
-                source.read_verified_startup_frame(
-                    volatile_path("ALT111_STREAM_READY_FILE", "/tmp/altscreen-private111.stream-ready"),
-                    &frame)) {
-                startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
-                startup_progress.frames = 2u;
-                recovered_current_session = reused_producer_progress = true;
-                fprintf(stderr,
-                        "direct111: PHASE=STARTUP_PROGRESS_REUSED source=producer_stream_ready "
-                        "validated_frames=2 writer_pid=%u generation=%u cookie=0x%08x "
-                        "stable_copy=1 live_producer=1 duplicate_frame_wait=0\n",
-                        (unsigned)startup_progress.writer, (unsigned)startup_progress.generation,
-                        (unsigned)startup_progress.cookie);
-            }
-            if (!recovered_current_session && source.decoded_ready() &&
-                source.current_frame_session_active()) {
-                /* A marker mismatch may follow a valid first copy. It is one
-                 * observed frame, not a two-frame proof; retain it for retry. */
-                startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
-            }
 
             /*
              * Matching active flags alone are not enough: a producer that died
@@ -851,23 +918,23 @@ int main(int argc, char **argv) {
              * Require two distinct stable decoded frames while H264+decoded SHM
              * identities still match before bypassing the consumed phone gate.
              */
-            for (unsigned retry = 0; retry < 80u && !g_stop && !recovered_current_session; ++retry) {
+            for (unsigned retry = 0; retry < 80u && !g_stop; ++retry) {
                 if (!source.current_session_active()) {
-                    startup_progress.reset();
+                    fresh_frames = 0u;
                     usleep(50000);
                     continue;
                 }
 
-                if (source.read_frame(&frame)) {
-                    startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
-                    if (startup_progress.frames >= 2u && source.current_frame_session_active()) {
+                if (source.read_frame(&recovery_probe)) {
+                    ++fresh_frames;
+                    if (fresh_frames >= 2u) {
                         recovered_current_session = true;
                         fprintf(stderr,
                                 "direct111: PHASE=GATE_RECOVER_CURRENT_SESSION "
                                 "validated=1 retries=%u fresh_decoded_frames=%u "
                                 "policy=matching_identity_plus_frame_progress "
                                 "consumed_phone_gate_bypass=1\n",
-                                retry, startup_progress.frames);
+                                retry, fresh_frames);
                         break;
                     }
                 }
@@ -888,7 +955,6 @@ int main(int argc, char **argv) {
                 source.shutdown();
                 source_initialized = false;
             }
-            startup_progress.reset();
         }
     }
 
@@ -906,10 +972,14 @@ int main(int argc, char **argv) {
         source_initialized = true;
     }
 
+    VideoFrame frame;
     bool wait_reported = false;
     unsigned long wait_loops = 0;
+    unsigned startup_fresh_frames = 0u;
+    uint32_t startup_writer = 0u;
+    uint32_t startup_generation = 0u;
+    uint32_t startup_cookie = 0u;
     unsigned long long last_keyframe_request_us = 0ULL;
-    if (!source.current_frame_session_active()) startup_progress.reset();
     fprintf(stderr,
             "direct111: PHASE=PIPELINE_WAIT "
             "waiting=H264_TAP+DECODER_FRESH_PROGRESS "
@@ -918,32 +988,43 @@ int main(int argc, char **argv) {
 
     while (!g_stop) {
         bound_private_output();
-        if (startup_progress.frames < 2u && source.read_frame(&frame)) {
-            startup_progress.observe(source.writer_pid(), source.generation(), source.stream_cookie());
-        }
-        if (startup_progress.frames >= 2u) {
-            if (source.current_frame_session_active()) {
+        if (source.read_frame(&frame)) {
+            const uint32_t writer = source.writer_pid();
+            const uint32_t gen = source.generation();
+            const uint32_t cookie = source.stream_cookie();
+
+            if (writer != startup_writer ||
+                gen != startup_generation ||
+                cookie != startup_cookie) {
+                startup_writer = writer;
+                startup_generation = gen;
+                startup_cookie = cookie;
+                startup_fresh_frames = 1u;
+            } else {
+                ++startup_fresh_frames;
+            }
+
+            if (startup_fresh_frames >= 2u) {
                 fprintf(stderr,
                         "direct111: PHASE=PIPELINE_SOURCE_PRIMED "
                         "fresh_frames=%u writer_pid=%u generation=%u "
-                        "cookie=0x%08x stale_single_frame_rejected=1 producer_progress_reused=%d\n",
-                        startup_progress.frames, (unsigned)startup_progress.writer,
-                        (unsigned)startup_progress.generation,
-                        (unsigned)startup_progress.cookie, reused_producer_progress ? 1 : 0);
+                        "cookie=0x%08x stale_single_frame_rejected=1\n",
+                        startup_fresh_frames, (unsigned)startup_writer,
+                        (unsigned)startup_generation,
+                        (unsigned)startup_cookie);
                 break;
             }
-            startup_progress.reset();
         }
 
         /* Still short of two fresh frames for a known session: ask, then
          * re-ask every 3 s (bounded) instead of waiting for a quiet phone. */
-        if (source.writer_pid() && startup_progress.frames < 2u) {
+        if (source.writer_pid() && startup_fresh_frames < 2u) {
             const unsigned long long t = now_us();
             if (!last_keyframe_request_us ||
                 t - last_keyframe_request_us >= kKeyframeRequestRetryUs) {
                 last_keyframe_request_us = t ? t : 1ULL;
                 (void)request_consumer_keyframe(source,
-                    startup_progress.frames ? "one_fresh_frame" : "no_fresh_frame");
+                    startup_fresh_frames ? "one_fresh_frame" : "no_fresh_frame");
             }
         }
 
@@ -959,7 +1040,7 @@ int main(int argc, char **argv) {
                     (unsigned)source.h264_bytes(),
                     source.decoded_ready() ? 1 : 0,
                     (unsigned)source.decoded_frames(),
-                    startup_progress.frames);
+                    startup_fresh_frames);
         }
         usleep(20000);
     }
@@ -1169,7 +1250,7 @@ int main(int argc, char **argv) {
             in_stall = false;
             stall_start_us = 0;
             ++source_frames;
-            if (!display.present_frame(frame)) {
+            if (!present_through_veil(display, &frame)) {
                 fprintf(stderr,
                         "direct111: ERROR PHASE=DISPLAY_PRESENT "
                         "stopping_safely=1\n");
@@ -1216,7 +1297,14 @@ int main(int argc, char **argv) {
             }
 
             /* No fixed ~3s auto-exit: freeze the last frame and let the
-             * stop script / signal own teardown. */
+             * stop script / signal own teardown.  A veil still times out and
+             * fades in on that last frame. */
+            if (!present_through_veil(display, 0)) {
+                fprintf(stderr,
+                        "direct111: ERROR PHASE=DISPLAY_PRESENT "
+                        "stopping_safely=1\n");
+                break;
+            }
             usleep(kNoFramePollUs);
             continue;
         }

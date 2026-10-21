@@ -5,13 +5,17 @@
 本项目面向 Audi **MHI2Q** 平台，用于将 **CarPlay 原生 AltScreen / 第二屏导航画面**直接显示至车辆的 **Virtual Cockpit**。核心显示链路已完成实车验证。操作前请完整阅读本说明。
 
 **V3.8 Fix1 更新（修了这些现象，说人话版）：**
-- **用 CarPlay 打电话，在仪表上点"接听"，电话会立刻被挂断**——现在能正常接听，通话不再秒断；挂断也正常。
-- **大地图和小地图互相切换时，仪表会先露出"半张画面"**——现在切换时先黑一下、等新画面到位再显示，看不到残缺画面了。
-- **转向箭头切换时跳动生硬**——现在改成淡入淡出，过渡更顺。
+- **CarPlay 来电时在仪表或方向盘上按"接听"，接通一两秒后电话自己挂断**——现在接通后一直保持，直到你自己挂断。（已实车验证）
+- **仪表电话页"最近通话"里的时间比手机慢 8 小时**——现在显示车机本地时间，和手机一致。
+- **大地图和小地图互相切换时，仪表会先露出"半张画面"**——现在切换时先黑一下、等新画面到位再淡入，看不到残缺画面了。
+- **转向箭头出现和消失时跳动生硬**——现在改成淡入淡出，过渡更顺。
 - **奥迪 Q7 上只用 CarPlay 导航时，仪表不显示转向箭头**——现在也能正常显示箭头了。
 - **导航时仪表上会多出灰色方块/底板**——现在去掉了，只留转向箭头。
 - **用电脑（尤其 Mac）拷贝过 SD 卡里的文件夹后，安装或恢复会失败**——现在已兼容，不再中途报错。
 - 绿色菜单的抬头版本号更新为 "V3.8 Fix1"。
+
+> [!TIP]
+> 插着本项目的 SD 卡开机时，原车会把这张卡当成"媒体"音源恢复，但卡里没有能播放的歌，所以刚连上 CarPlay、手机还没放声音的那段时间，调音量会提示不可用；手机一放音乐就恢复。这是原车的音源逻辑，不是故障。装好以后平时用车可以把卡拔掉，只在需要抓日志时插上。
 
 **V3.8 更新：仪表电话页支持 CarPlay 通话（移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony）；仪表底部信息栏在路名后显示预计到达时间；新增手机转向卡片安装模式；修复首次连接时仪表第二屏不出画面；本项目原创部分改为禁止售卖的非商用许可。**
 
@@ -218,11 +222,9 @@ Virtual Cockpit
 
 ### 冷启动：等待原车仪表地图
 
-冷启动时，Java HMI 每 200 ms 在原车导航线程上检查一次仪表地图（MapKombi）是否已初始化；地图探测完成时会立即唤醒等待线程。初始化完成后，通过本机总线（TCP 19810，命令 `0x0119`）通知 `libcarplay_rgi_meta.so`，再转交给 `libcarplay_altscreen.so`。收到通知之前，hook 不会向 iPhone 请求第二屏画面（`showUI` / `forceKeyFrame`）、不切换 viewArea，显示进程也不会启动，所以开屏视频和第二屏画面都要等原车地图就绪后才出现。CarPlay 主屏、第二屏能力声明和 iPhone 建立第二屏视频流不受影响。
+冷启动时，Java HMI 每 500 ms 在原车导航线程上检查一次仪表地图（MapKombi）是否已初始化。初始化完成后，通过本机总线（TCP 19810，命令 `0x0119`）通知 `libcarplay_rgi_meta.so`，再转交给 `libcarplay_altscreen.so`。收到通知之前，hook 不会向 iPhone 请求第二屏画面（`showUI` / `forceKeyFrame`）、不切换 viewArea，显示进程也不会启动，所以开屏视频和第二屏画面都要等原车地图就绪后才出现。CarPlay 主屏、第二屏能力声明和 iPhone 建立第二屏视频流不受影响。
 
 这里等待的是原车仪表地图对象初始化完成，不是 GPS 定位，也不是开始导航。就绪状态只在内存中记录，之后原车地图隐藏也不会重新关闭。这一步没有超时：原车仪表地图没有起来时，第二屏一直等待。
-
-显示进程正常由 `stream_ready` 标记启动时，会校验标记中的 producer PID、generation、cookie、序号以及当前 NV12 帧，并复用标记已经证明的两帧就绪进度，不再重复等待两帧。若是异常重启、producer 身份变化或校验失败，仍会重新取得同一会话的两帧稳定画面。
 
 ### 性能优化：GPU 颜色转换
 
@@ -248,7 +250,9 @@ Virtual Cockpit
 本功能移植自 [Luka 的 mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) 的 CarPlay Telephony（原理见其 `docs/cluster-and-rgi/CARPLAY_TELEPHONY.md`），按本项目的单一 HMI JAR 结构做了适配。
 
 - 原车在 CarPlay 连接期间通过 BAP 告诉仪表"手机处于 Apple CarPlay 模式"，仪表电话页因此只显示提示。Java HMI 包装原车的仪表电话服务：只在原车自己判定 CarPlay 已连接时，改为向仪表报告免提电话，并填入 CarPlay 的通话、列表和信号；CarPlay 断开后重放原车的值。连接蓝牙电话时全部原样交给原车。
-- 通话状态取自原车终端模式事件总线（原车本来就把 DSICarplay 的通话状态转发到这里），拨号也走原车 CarPlay 的 `tel:` 拨号。本项目没有像 Luka 那样整体替换 `CarplayDSILifecycleController`，因为这个类在中国区固件上与 US / EU 不同；这样一个 HMI JAR 即可通用于 US（MU1316）、EU（MU1329）和 CN（MU1003）。
+- 通话状态取自原车终端模式事件总线（原车本来就把 DSICarplay 的通话状态转发到这里），拨号也走原车 CarPlay 的 `tel:` 拨号。本项目没有像 Luka 那样整体替换 `CarplayDSILifecycleController`（Luka 为中国区单独维护了一份该类的补丁），而是只用公开接口和运行时包装，这样一个 HMI JAR 即可通用于 US（MU1316）、EU（MU1329）和 CN（MU1003）。
+- 按一次方向盘电话键，CarPlay 会收到两份：仪表经 BAP 发出的接听 / 挂断（本项目转成 iAP2），以及原车 MFL 电话键发给 iPhone 的 HID 按键。在 HID 生效的车上，第二份会把刚接通的电话挂掉。Java HMI 在运行时包装原车 `DSISmartphoneManagerProxy` 的电话控制器，只在仪表电话页显示 CarPlay 通话且有通话时丢弃原车这一份（hook / hangup / flash），其他按键和原车其他挂断路径不受影响；与 Luka 在 `postDSICarplayButtonEvent` 处的改法等效，但不替换任何原车类。原车每次切换设备时会重写这个控制器，所以 CarPlay 激活时和每次通话状态更新时都会重新挂上；包装不上时什么也不做，原车行为不变。
+- 最近通话的时间由 iPhone 以 UTC 时间戳发来，按车机自己的时区和夏令时换算后显示，与车机时钟和底部到达时间一致。
 - `libcarplay_rgi_meta.so` 中的电话模块通过 iAP2 订阅最近通话和个人收藏，只读原车已订阅的信号、运营商和电量信息，并把接听、挂断、切换、保持、静音命令发给 iPhone，与 Java 之间同样走本机 TCP 19810。安装时在 `dio_manager.json` 中登记这 7 个 iAP2 消息号（`0x415B`–`0x415D`、`0x415F`、`0x4160`、`0x4170`、`0x4171`），复原时随原车备份还原。
 - 为此替换了三个原车类：`ServiceManagerPhone`、电话与系统状态机的 `Activator`。它们在三版固件中逐字节相同；如果本项目的电话类无法加载，会自动退回原车对象，不影响原车电话和整个 HMI 启动。
 
@@ -351,7 +355,7 @@ Customization
 └─ MMI-Cockpit-Carplay
 ```
 
-   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.8`**），菜单中有 4 个安装选项（`INSTALL WITH NOTHING`、`INSTALL WITH RGI`、`INSTALL WITH CARD`、`INSTALL WITH RGI CARD`）、3 个卡片位置选项（`CARD LEFT`、`CARD TOP`、`CARD RIGHT`）和 `RESTORE ORIGINAL`。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
+   确认菜单顶部显示的版本号与下载的安装包一致（当前为 **`Version: V3.8 Fix1`**），菜单中有 4 个安装选项（`INSTALL WITH NOTHING`、`INSTALL WITH RGI`、`INSTALL WITH CARD`、`INSTALL WITH RGI CARD`）、3 个卡片位置选项（`CARD LEFT`、`CARD TOP`、`CARD RIGHT`）和 `RESTORE ORIGINAL`。如果仍是旧版本号，说明车机里的菜单和脚本还是旧的，此时执行 `INSTALL` 仍会运行旧的安装流程；请重新执行 `Update Toolbox`，确认版本号正确后再继续。
 
 5. 如果此时仍提示：
 
@@ -408,7 +412,7 @@ Script not found:
 - 安装后，每次开机的运行日志会自动保存到 SD 卡的 `MMI-Cockpit-Carplay/logs/boots/boot_*/` 目录（开机时需插着 SD 卡），包括 private111 建连与断开、H.264、Screen 读取、decoded SHM、显示帧率、displayable3、Context80、viewArea 与布局状态、防火墙规则和网络状态，以及原车系统日志。
 - 安装、复原等操作的日志保存在 SD 卡的 `MMI-Cockpit-Carplay/logs/operations/` 目录。
 - 车机上运行中的日志位于 `/tmp/`，例如 `/tmp/altscreen_hook.log`、RGI 渲染器的 `/tmp/maneuver_render.log`。
-- 仪表电话页的日志：Java 侧在 `carplay_hook.log`（`TELEPHONY_BRIDGE`、`TELEPHONY_GATE`、`TELEPHONY_LISTS`、`TELEPHONY_ACTION`、`TELEPHONY_POPUP_SKIP`），iAP2 侧在 `carplay_rgi_native.log`（`TELEPHONY_READY`、`TELEPHONY_LISTS_REQUESTED`、`TELEPHONY_CMD`）。两者都会随开机日志保存到 SD 卡的 `streams/` 目录。
+- 仪表电话页的日志：Java 侧在 `carplay_hook.log`（`TELEPHONY_BRIDGE`、`TELEPHONY_GATE`、`TELEPHONY_LISTS`、`TELEPHONY_ACTION`、`TELEPHONY_POPUP_SKIP`，以及方向盘电话键过滤的 `TELEPHONY_STOCK_HID_FILTER installed / re-armed / not installed` 和 `TELEPHONY_STOCK_HID_DROPPED`），iAP2 侧在 `carplay_rgi_native.log`（`TELEPHONY_READY`、`TELEPHONY_LISTS_REQUESTED`、`TELEPHONY_CMD`）。两者都会随开机日志保存到 SD 卡的 `streams/` 目录。
 - 出现问题时请先保存完整日志，再修改配置或代码。反馈问题时请附上 SD 卡上整个 `MMI-Cockpit-Carplay/logs/` 目录，并说明固件版本与地区、Classic / Sport 和 FULL / SMALL 布局，以及连接方式（先插手机再启动车机 / 车机完全启动后再插手机 / 快速重连）。
 
 ### 7. 恢复原车
@@ -491,7 +495,7 @@ GPL-3.0 部分仍允许任何人按 GPL-3.0 使用、修改和再分发；再分
 
 ~~~text
 main
-└── AUG22 / V3.8
+└── AUG22 / V3.8 Fix1
     ├── 中国区（CN）固件：实车测试可用
     ├── 欧洲区（ER）部分固件：用户实车反馈可用（P5092 / P5152，MU 1329）
     └── 其他地区固件：可能存在未知 BUG，不保证 100% 可用
@@ -500,6 +504,18 @@ main
 当前公开版本以稳定、可安装、可恢复为优先目标。
 
 ### 更新记录
+
+**V3.8 Fix1**
+
+- 修复 CarPlay 来电在仪表或方向盘上接听后约 1~2 秒自动挂断：一次电话键按下时，原车 MFL 的 HID 按键和仪表经 iAP2 的接听同时到达 iPhone，第二份会挂断刚接通的电话。现在在 CarPlay 通话期间于运行时丢弃原车那一份，只保留 iAP2；不替换任何原车类，US / EU / CN 通用。已在 CN（K1004）实车验证。
+- 修复仪表电话页"最近通话"时间显示为 UTC（比北京时间慢 8 小时）：改为按车机时区和夏令时换算。
+- 运动模式大地图 / 小地图切换时，仪表先显示黑帧，等新画面到位后再淡入，不再露出错位的旧画面；经典模式同位置切换保持原样。
+- 转向箭头出现和消失改为淡入淡出，箭头移动前先隐藏再淡入。
+- Q7：仪表在只有 CarPlay 导航时不发送箭头可见指令，导航开始 1.5 秒后自动显示转向箭头；仪表一旦发送指令即以仪表为准。B9 不变。
+- 去掉导航时仪表上多余的灰色底板，只保留转向箭头。
+- 兼容用电脑（尤其 Mac）拷贝过的 SD 卡：安装和恢复不再因 QNX 拷贝目录失败而中断。
+- 绿色菜单版本标识更新为 `V3.8 Fix1`。
+- 本版不含 PR #62（冷启动探测加快和显示进程帧复用）：该改动尚未经过 QNX 编译和实车验证，暂未纳入发布包，源码也回到发布包对应的版本，验证后再合入。
 
 **V3.8**
 
