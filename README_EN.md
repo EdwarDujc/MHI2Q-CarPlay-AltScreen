@@ -1,8 +1,17 @@
-# MIB2 Toolbox — CarPlay AltScreen V3.8
+# MIB2 Toolbox — CarPlay AltScreen V3.8 Fix1
 
 **English** | [简体中文](README.md)
 
 This project is designed for the Audi **MHI2Q** platform and displays the **native CarPlay AltScreen / secondary navigation view** directly on the vehicle's **Virtual Cockpit**. The core display path has been verified in a vehicle. Read this document in full before making changes to the head unit.
+
+**V3.8 Fix1 update (plain-language: the things that were fixed):**
+- **On a CarPlay phone call, pressing "Answer" on the cluster dropped the call instantly** — it now answers normally and stays connected; hang up works too.
+- **Switching between the big map and the small map left half a frame showing on the cluster** — it now goes black briefly and shows the new view once it's ready, so you no longer see a half-drawn screen.
+- **The turn arrow jumped abruptly when it changed** — it now fades in and out.
+- **On the Audi Q7, the turn arrow didn't show when navigating with CarPlay only** — the arrow now appears.
+- **A stray grey box / backing plate showed on the cluster during navigation** — it's gone now, only the turn arrow remains.
+- **Installing or restoring failed after SD-card folders had been copied by a computer (especially a Mac)** — this is now tolerated and no longer aborts.
+- The green-menu header now reads "V3.8 Fix1".
 
 **V3.8 update: CarPlay calls on the cluster telephone tab (ported from [Luka's mib2q-carplay-rgi](https://github.com/luka-dev/mib2q-carplay-rgi) CarPlay Telephony); the cluster's lower info bar shows the estimated arrival time after the road name; new install modes with the iPhone's maneuver card; fixed the cluster display staying blank on the first connection; the project's original parts are now under a noncommercial license that forbids selling.**
 
