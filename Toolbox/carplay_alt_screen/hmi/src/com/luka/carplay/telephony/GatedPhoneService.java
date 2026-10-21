@@ -65,6 +65,13 @@ public class GatedPhoneService implements CombiBAPServicePhone {
                              TEL_CMD_SWAP = 5;
     /* BAP callMode, as stock BAPPropertyTelCombinedNumbers.getCallMode maps DSI stacks. */
     private static final int CALLMODE_MISSED = 1, CALLMODE_RECEIVED = 2, CALLMODE_DIALED = 3;
+    /* DSICarplay BUTTON_*: CarPlay's HID telephony keys, as stock MFLPhoneButtonsListener
+     * posts them (FLASH 20 on a one-key wheel, HOOK 13 / HANGUP 14 on a two-key wheel).
+     * A single Tel press reaches CarPlay twice -- the stock HID key and the VC's BAP
+     * accept/hangup -- so while a gated CarPlay call exists the stock copy is dropped and
+     * only iAP2 acts; on a unit where the HID key works it would otherwise act a second
+     * time (a FLASH right after the accept) and end the call. */
+    private static final int BUTTON_ACCEPT_CALL = 13, BUTTON_END_CALL = 14, BUTTON_FLASH_CALL = 20;
     private static final int RESULT_OK = 0, RESULT_FAILED = 1;
 
     /** CarPlay-side commands, installed by TelephonyEventBridge once the event bus is known. */
@@ -160,6 +167,19 @@ public class GatedPhoneService implements CombiBAPServicePhone {
         synchronized (GatedPhoneService.class) { g = instance; }
         return g != null && g.handle(action, number);
     }
+
+    /** True when the patched CarplayDSIController should swallow a stock MFL phone HID
+     * key: the key is accept/hangup/flash AND a gated CarPlay call exists, so the VC's
+     * BAP copy already answers it over iAP2. Without a call the VC sends no BAP action
+     * (it only opens the list), so the stock key passes through unchanged. */
+    public static boolean dropStockPhoneKey(int id) {
+        if (id != BUTTON_ACCEPT_CALL && id != BUTTON_END_CALL && id != BUTTON_FLASH_CALL) return false;
+        GatedPhoneService g;
+        synchronized (GatedPhoneService.class) { g = instance; }
+        return g != null && g.gatedWithCall();
+    }
+
+    private synchronized boolean gatedWithCall() { return gated && liveCalls() > 0; }
 
     private synchronized boolean handle(int action, String number) {
         if (!gated) return false;

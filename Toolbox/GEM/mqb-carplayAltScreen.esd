@@ -1,11 +1,11 @@
 ###########################################################################################
-# MMI-Cockpit-Carplay V3.8 - CarPlay Private111 Direct Display / Context80
+# MMI-Cockpit-Carplay V3.8 Fix1 - CarPlay Private111 Direct Display / Context80
 ###########################################################################################
 screen "MMI-Cockpit-Carplay" Customization
 
 keyValue
     value   String sys 0x00000000 0
-    label   "Version: V3.8"
+    label   "Version: V3.8 Fix1"
     poll    0
 
 keyValue
